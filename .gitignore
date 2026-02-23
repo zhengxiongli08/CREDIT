@@ -1,0 +1,6 @@
+# Ignore files
+bin/
+trash/
+results/
+.clangd
+.clang-format
