@@ -1,429 +1,534 @@
-#include <cuda_runtime.h>
-#include <stdio.h>
-#include <iostream>
-#include <vector>
-#include <numeric>
-#include <cooperative_groups.h>
-
-namespace cg = cooperative_groups;
-
-// -------------------------------------------------------------------------
-// CONSTANTS & MACROS
-// -------------------------------------------------------------------------
 /*
-RTX 5090 Spces
+RTX 5090 Official Specs
 L1 cache: 128KB per SM
 L2 cache: 96MB (L2 is shared across all SMs)
 Global memory: 32GB
+Global memory bandwidth: 1.79TB/s
 */
-#define ITERATIONS 10000
-#define MB (1024 * 1024)
-#define L1_SIZE_BYTES (24 * 1024)      // 24KB, small enough to fit in L1
-#define L2_SIZE_BYTES (24 * 1024 * 1024) // 24MB, fits in L2, spills L1
-#define GLOBAL_SIZE_BYTES (256 * 1024 * 1024) // 256MB, spills L2
 
-#define CHECK_CUDA(call) \
-    do { \
-        cudaError_t err = call; \
-        if (err != cudaSuccess) { \
-            fprintf(stderr, "CUDA Error: %s (Line %d)\n", cudaGetErrorString(err), __LINE__); \
-            return 1; \
-        } \
+#include <cooperative_groups.h>
+#include <cuda_runtime.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+namespace cg = cooperative_groups;
+
+#define CUDA_CHECK(x)                                                         \
+    do {                                                                      \
+        cudaError_t _e = (x);                                                 \
+        if (_e != cudaSuccess) {                                              \
+            fprintf(stderr, "CUDA error %s:%d : %s\n",                      \
+                    __FILE__, __LINE__, cudaGetErrorString(_e));              \
+            exit(EXIT_FAILURE);                                               \
+        }                                                                     \
     } while (0)
 
-// P1: memory latency (pointer chasing, cannot be pipelined)
-__global__ void latency_kernel(const int* __restrict__ data, int* __restrict__ sink, int N) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid > 0) return; // Single thread measurement to avoid contention
+// Explicit PTX loads let us control which cache hierarchy is targeted.
+__device__ __forceinline__ int4 ld_global_ca_int4(const int4* addr) {
+    int4 value;
+    asm volatile(
+        "ld.global.ca.v4.s32 {%0, %1, %2, %3}, [%4];"
+        : "=r"(value.x), "=r"(value.y), "=r"(value.z), "=r"(value.w)
+        : "l"(addr)
+        : "memory");
+    return value;
+}
 
-    int k = 0;
-    long long start_time = clock64();
+__device__ __forceinline__ int4 ld_global_cg_int4(const int4* addr) {
+    int4 value;
+    asm volatile(
+        "ld.global.cg.v4.s32 {%0, %1, %2, %3}, [%4];"
+        : "=r"(value.x), "=r"(value.y), "=r"(value.z), "=r"(value.w)
+        : "l"(addr)
+        : "memory");
+    return value;
+}
 
-    // Critical loop: dependent loads
+// Build a single cycle through the array for pointer-chasing latency tests.
+void init_stride_cycle(int* data, int elements, int stride) {
+    int cur = 0;
+    for (int i = 0; i < elements; ++i) {
+        data[cur] = (cur + stride) % elements;
+        cur = data[cur];
+    }
+}
+
+// Convert CUDA event time to device clock cycles.
+double elapsed_cycles(float elapsed_ms, int clock_rate_khz) {
+    return static_cast<double>(elapsed_ms) * static_cast<double>(clock_rate_khz);
+}
+
+// Pointer-chasing through an L1-resident array to measure serialized hit latency.
+__global__ void read_latency_kernel(
+    const int* __restrict__ data,
+    int iterations,
+    long long* __restrict__ result,
+    int* __restrict__ sink)
+{
+    int ptr = 0;
+    long long start = clock64();
+
     #pragma unroll 1
-    for (int i = 0; i < ITERATIONS; ++i) {
-        k = data[k];
+    for (int i = 0; i < iterations; ++i) {
+        asm volatile("ld.global.ca.s32 %0, [%1];" : "=r"(ptr) : "l"(&data[ptr]) : "memory");
     }
 
-    long long end_time = clock64();
-    sink[0] = k; // Prevent compiler optimization
-    
-    float lat = (float)(end_time - start_time) / ITERATIONS;
-    printf("  [Size: %d MB] Latency: %.2f cycles\n", N / (1024*1024/4), lat);
-
-    return;
+    long long end = clock64();
+    *result = end - start;
+    *sink = ptr;
 }
 
-// Helper to initialize pointer chasing array
-void init_stride_array(int* h_data, int size_elements, int stride_elements) {
-    for (int i = 0; i < size_elements; ++i) {
-        h_data[i] = (i + stride_elements) % size_elements;
+// Pointer-chasing with .cg loads to bypass L1 and measure L2 hit latency.
+__global__ void l2_read_latency_kernel(
+    const int* __restrict__ data,
+    int iterations,
+    long long* __restrict__ result,
+    int* __restrict__ sink)
+{
+    int ptr = 0;
+    long long start = clock64();
+
+    #pragma unroll 1
+    for (int i = 0; i < iterations; ++i) {
+        asm volatile("ld.global.cg.s32 %0, [%1];" : "=r"(ptr) : "l"(&data[ptr]) : "memory");
     }
+
+    long long end = clock64();
+    *result = end - start;
+    *sink = ptr;
 }
 
-// -------------------------------------------------------------------------
-// PART 2: MEMORY BANDWIDTH
-// -------------------------------------------------------------------------
-// Uses int4 (128-bit) loads to maximize memory pressure.
-__global__ void bandwidth_kernel(const int4* __restrict__ src, int4* __restrict__ dst, long long N_vectors) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+// Pointer-chasing over a working set larger than L2 to approximate DRAM latency.
+__global__ void dram_read_latency_kernel(
+    const int* __restrict__ data,
+    int iterations,
+    long long* __restrict__ result,
+    int* __restrict__ sink)
+{
+    int ptr = 0;
+    long long start = clock64();
+
+    #pragma unroll 1
+    for (int i = 0; i < iterations; ++i) {
+        asm volatile("ld.global.cg.s32 %0, [%1];" : "=r"(ptr) : "l"(&data[ptr]) : "memory");
+    }
+
+    long long end = clock64();
+    *result = end - start;
+    *sink = ptr;
+}
+
+// Each block repeatedly scans a private L1-sized region to estimate per-SM L1 bandwidth.
+__global__ void l1_bandwidth_kernel(
+    const int4* __restrict__ data,
+    int vectors_per_block,
+    int repeats,
+    int* __restrict__ sink)
+{
+    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int4* block_base = data + static_cast<long long>(blockIdx.x) * vectors_per_block;
+    int accum = 0;
+
+    for (int rep = 0; rep < repeats; ++rep) {
+        for (int idx = threadIdx.x; idx < vectors_per_block; idx += blockDim.x) {
+            int4 value = ld_global_ca_int4(block_base + idx);
+            accum += value.x + value.y + value.z + value.w;
+        }
+    }
+
+    sink[global_tid] = accum;
+}
+
+// Stream through an L2-sized array with .cg loads to estimate aggregate L2 bandwidth.
+__global__ void l2_bandwidth_kernel(
+    const int4* __restrict__ data,
+    long long total_vectors,
+    int repeats,
+    int* __restrict__ sink)
+{
+    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = gridDim.x * blockDim.x;
+    int accum = 0;
 
-    for (long long i = idx; i < N_vectors; i += stride) {
+    for (int rep = 0; rep < repeats; ++rep) {
+        for (long long idx = global_tid; idx < total_vectors; idx += stride) {
+            int4 value = ld_global_cg_int4(data + idx);
+            accum += value.x + value.y + value.z + value.w;
+        }
+    }
+
+    sink[global_tid] = accum;
+}
+
+// Simple read+write copy kernel to estimate sustained DRAM bandwidth.
+__global__ void dram_bandwidth_kernel(
+    const int4* __restrict__ src,
+    int4* __restrict__ dst,
+    long long total_vectors)
+{
+    long long idx = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+
+    for (long long i = idx; i < total_vectors; i += stride) {
         dst[i] = src[i];
     }
 }
 
-// -------------------------------------------------------------------------
-// PART 3: CLUSTER / DSMEM
-// -------------------------------------------------------------------------
+// Inter-SM DSMEM microbenchmark for a fixed 2-block cluster.
+//
+// Block rank 0 acts as the requester and block rank 1 provides the remote
+// shared memory backing store. The kernel measures four behaviors:
+// 1) cluster.sync() overhead,
+// 2) remote shared-memory writes (push bandwidth),
+// 3) remote shared-memory reads (pull bandwidth),
+// 4) serialized remote pointer-chase reads (pull latency).
+//
+// Note that remote write latency is intentionally not measured. DSMEM stores
+// are fire-and-forget, so observing an individual store's completion requires
+// an acknowledgment path or barrier, which would change the metric into a
+// round-trip synchronization cost rather than a pure write latency.
 __global__ void __cluster_dims__(2, 1, 1) cluster_bench(int* dump_sink) {
-    // Get current rank in the cluster
-    cg::grid_group grid = cg::this_grid();
+    // Form a two-block cluster and identify which block is local vs remote.
     cg::cluster_group cluster = cg::this_cluster();
     unsigned int rank = cluster.block_rank();
 
-    const int num_ints = 1024; // 4KB per thread block pass
-    const int iters = 1000;
+    // payload_ints is the amount of DSMEM traffic per loop iteration.
+    // bandwidth_iters increases the total bytes moved so timing noise is small.
+    // latency_iters keeps the pointer chase long enough to average the result.
+    constexpr int payload_ints = 1024;
+    constexpr int bandwidth_iters = 1000;
+    constexpr int latency_iters = 100000;
 
-    // 3.1 Cluster Barrier Latency [cite: 36]
-    // Measure barrier.cluster.arrive/wait cycle cost
+    // Each block exposes its local shared memory to the cluster. Rank 0 maps
+    // rank 1's shared memory and rank 1 maps rank 0's shared memory, although
+    // only rank 0 actively uses the remote mapping for measurement here.
+    extern __shared__ int local_smem[];
+    int* remote_smem = cluster.map_shared_rank(local_smem, 1 - rank);
+
+    // Measure the cost of a single cluster-wide barrier.
     if (threadIdx.x == 0 && rank == 0) {
         long long start = clock64();
-        cluster.sync(); // Calls barrier.cluster.arrive + wait
+        cluster.sync();
         long long end = clock64();
-        printf("  [Cluster] Sync Latency (2 Blocks): %lld cycles\n", (end - start));
+        printf("----- Inter-SM DSMEM (clusterDim=2) -----\n");
+        printf("Cluster sync overhead   : %lld cycles\n", end - start);
     } else {
         cluster.sync();
     }
 
-    // 3.2 DSMEM Bandwidth (Push Pattern) [cite: 95, 120]
-    // Block 0 writes to Block 1's shared memory.
-    extern __shared__ int local_smem[];
-    
-    // Map address of Block 1's shared memory
-    int* remote_smem = cluster.map_shared_rank(local_smem, 1 - rank);
-
+    // Push benchmark: rank 0 writes directly into rank 1's shared memory.
+    // The measured time includes the transfer plus the final cluster barrier
+    // that ensures all remote writes are visible before reporting bandwidth.
     if (rank == 0) {
-        // I am the PRODUCER (Block 0)
-        // Write to CONSUMER (Block 1)
         long long start = clock64();
-        
-        
+
         #pragma unroll
-        for(int i=0; i < iters; i++) {
-             // Each thread writes one int to remote shared memory (push pattern)
-             if(threadIdx.x < num_ints) {
-                 remote_smem[threadIdx.x] = i; 
-             }
+        for (int iter = 0; iter < bandwidth_iters; ++iter) {
+            if (threadIdx.x < payload_ints) {
+                remote_smem[threadIdx.x] = iter;
+            }
         }
-        cluster.sync(); // Ensure data is landed
+        cluster.sync();
         long long end = clock64();
 
         if (threadIdx.x == 0) {
-             // Total bytes = 1000 iter * 1024 ints * 4 bytes
-             double bytes = (double)iters * num_ints * sizeof(int);
-             double cycles = (double)(end - start);
-             // Approximate bytes/cycle
-             printf("  [Cluster] DSMEM PUSH Bandwidth: %.2f Bytes/Cycle\n", bytes/cycles);
+            double bytes = static_cast<double>(bandwidth_iters) * payload_ints * sizeof(int);
+            printf("DSMEM write bandwidth   : %.2f B/cycle\n", bytes / static_cast<double>(end - start));
         }
     } else {
-        // I am the CONSUMER (Block 1)
-        // Just wait for data
+        // Rank 1 only participates in the barrier and keeps a side effect so
+        // the compiler cannot treat the remote stores as dead.
         cluster.sync();
-        if(threadIdx.x == 0) dump_sink[0] = local_smem[0]; // Side effect
+        if (threadIdx.x == 0) {
+            dump_sink[0] = local_smem[0];
+        }
     }
 
-    // 3.3 Pull pattern
-    // First, Rank 1 prepares data for Rank 0 to pull
-    if (rank == 1 && threadIdx.x < num_ints) {
+    // Prepare rank 1's local shared memory so rank 0 can measure remote reads.
+    if (rank == 1 && threadIdx.x < payload_ints) {
         local_smem[threadIdx.x] = threadIdx.x;
     }
-    cluster.sync(); // Ensure data is ready in Rank 1's SMEM
+    cluster.sync();
 
+    // Pull benchmark: rank 0 repeatedly reads rank 1's shared memory.
+    // This measures sustained DSMEM read bandwidth rather than single-access
+    // latency because many threads issue reads in parallel.
     if (rank == 0) {
         int thread_sum = 0;
         long long start = clock64();
-        
-        for(int i=0; i < iters; i++) {
-            if(threadIdx.x < num_ints) {
-                // PULL: Explicitly reading from remote
+
+        #pragma unroll
+        for (int iter = 0; iter < bandwidth_iters; ++iter) {
+            if (threadIdx.x < payload_ints) {
                 thread_sum += remote_smem[threadIdx.x];
             }
         }
-        
-        cluster.sync(); // Ensure all reads finished
+
+        cluster.sync();
         long long end = clock64();
 
         if (threadIdx.x == 0) {
-            dump_sink[0] = thread_sum; // Prevent optimization
-            double bytes = (double)iters * num_ints * sizeof(int);
-            printf("  [Cluster] DSMEM PULL Bandwidth: %.2f Bytes/Cycle\n", bytes/(double)(end - start));
+            dump_sink[0] = thread_sum;
+            double bytes = static_cast<double>(bandwidth_iters) * payload_ints * sizeof(int);
+            printf("DSMEM read bandwidth    : %.2f B/cycle\n", bytes / static_cast<double>(end - start));
         }
     } else {
-        cluster.sync(); // Participate in the timing barrier
+        cluster.sync();
     }
 
-    // Measure the PULL latency
+    // Set up a dependent pointer chain in remote shared memory. Each load
+    // determines the next address, so the accesses cannot be pipelined and the
+    // average cycles per iteration approximate remote DSMEM read latency.
     if (threadIdx.x == 0) {
-        local_smem[0] = 0; 
+        local_smem[0] = 0;
     }
     cluster.sync();
 
     if (rank == 0 && threadIdx.x == 0) {
-        int k = 0;
+        int ptr = 0;
         long long start = clock64();
 
         #pragma unroll 1
-        for (int i = 0; i < ITERATIONS; ++i) {
-            // PULL Latency: Each load must cross the NoC to Rank 1
-            // and return before the next iteration can start.
-            k = remote_smem[k]; 
+        for (int iter = 0; iter < latency_iters; ++iter) {
+            ptr = remote_smem[ptr];
         }
 
         long long end = clock64();
-        dump_sink[0] = k;
-        printf("  [Cluster] DSMEM PULL Latency: %.2f cycles\n", (float)(end - start) / ITERATIONS);
-    }
-    else {
-        cluster.sync();
-    }
-
-    return;
-}
-
-// Dynamic Cluster Scaling Kernel
-// No __cluster_dims__ macro here; we set it in host code.
-__global__ void myClusterScaling(int* dump_sink, int num_iters) {
-    cg::cluster_group cluster = cg::this_cluster();
-    unsigned int rank = cluster.block_rank();
-    unsigned int cluster_size = cluster.num_blocks();
-
-    // 1. SYNC Latency
-    // Measure barrier cost for N blocks
-    if (rank == 0 && threadIdx.x == 0) {
-        long long start = clock64();
-        cluster.sync();
-        long long end = clock64();
-        printf("[Cluster Size %d] SYNC Latency: %lld cycles\n", cluster_size, (end - start));
-    } else {
-        cluster.sync();
-    }
-
-    // Setup for Bandwidth Tests (Ring Pattern)
-    // Rank i talks to Rank (i+1)%Size
-    extern __shared__ int local_smem[];
-    int neighbor_rank = (rank + 1) % cluster_size;
-    int* remote_smem = cluster.map_shared_rank(local_smem, neighbor_rank);
-
-    const int num_ints = 1024; // 4KB payload
-    
-    // 2. PUSH Bandwidth (Aggregate)
-    // Every block pushes to its neighbor simultaneously
-    cluster.sync();
-    
-    long long start_push = clock64();
-    #pragma unroll
-    for(int i=0; i < num_iters; i++) {
-        if(threadIdx.x < num_ints) {
-            remote_smem[threadIdx.x] = i; 
-        }
-    }
-    cluster.sync(); // Wait for all pushes to land
-    long long end_push = clock64();
-
-    // Only Rank 0 prints the *Aggregate* bandwidth
-    if (rank == 0 && threadIdx.x == 0) {
-        double total_bytes = (double)num_iters * num_ints * sizeof(int);
-        double cycles = (double)(end_push - start_push);
-        printf("[Cluster Size %d] PUSH Bandwidth (Aggregate): %.2f Bytes/Cycle\n", cluster_size, total_bytes/cycles);
-    }
-
-    // 3. PULL Bandwidth (Aggregate)
-    // Every block pulls from its neighbor
-    // First, ensure data exists
-    if (threadIdx.x < num_ints) local_smem[threadIdx.x] = rank;
-    cluster.sync();
-
-    long long start_pull = clock64();
-    int sum = 0;
-    #pragma unroll
-    for(int i=0; i < num_iters; i++) {
-        if(threadIdx.x < num_ints) {
-            sum += remote_smem[threadIdx.x]; 
-        }
-    }
-    cluster.sync();
-    long long end_pull = clock64();
-
-    if (rank == 0 && threadIdx.x == 0) {
-        dump_sink[0] = sum;
-        double total_bytes = (double)num_iters * num_ints * sizeof(int);
-        double cycles = (double)(end_pull - start_pull);
-        printf("[Cluster Size %d] PULL Bandwidth (Aggregate): %.2f Bytes/Cycle\n", cluster_size, total_bytes/cycles);
-    }
-
-    // 4. PULL Latency (Single Link)
-    // Only Rank 0 reads from Rank 1 (or Neighbor). 
-    // We don't scale this because latency is a point-to-point metric.
-    if (threadIdx.x == 0) local_smem[0] = 0;
-    cluster.sync();
-
-    if (rank == 0 && threadIdx.x == 0) {
-        int k = 0;
-        long long start_lat = clock64();
-        #pragma unroll 1
-        for (int i = 0; i < 10000; ++i) {
-             k = remote_smem[k]; 
-        }
-        long long end_lat = clock64();
-        dump_sink[0] = k;
-        printf("[Cluster Size %d] PULL Latency: %.2f cycles\n", cluster_size, (float)(end_lat - start_lat) / 10000.0f);
+        dump_sink[0] = ptr;
+        printf("DSMEM read latency      : %.2f cycles\n", static_cast<double>(end - start) / latency_iters);
     } else {
         cluster.sync();
     }
 }
 
-// -------------------------------------------------------------------------
-// MAIN
-// -------------------------------------------------------------------------
 int main() {
-    int dev_id = 0;
-    cudaSetDevice(dev_id);
+    // Working-set sizes are chosen to target L1, L2, and DRAM respectively.
+    constexpr int L1_ELEMS = 1 << 13;
+    constexpr int L2_ELEMS = 1 << 21;
+    constexpr int DRAM_ELEMS = 1 << 26;
+    constexpr int DRAM_STRIDE = L2_ELEMS + 1;
+    constexpr int LATENCY_ITERS = 100000;
+    constexpr int L1_BW_REPEATS = 4096;
+    constexpr int L2_BW_REPEATS = 1024;
+    constexpr int BW_BLOCK_SIZE = 256;
+    constexpr int DSMEM_SHARED_BYTES = 1024 * sizeof(int);
+
+    // Query device properties once so the same clock rate is reused for all reports.
+    constexpr int device = 0;
+    CUDA_CHECK(cudaSetDevice(device));
+
     cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, dev_id);
-    printf("Benchmarking NVIDIA GPU: %s (CC %d.%d)\n", prop.name, prop.major, prop.minor);
-    printf("--------------------------------------------------\n");
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
 
-    int clockRateKHz;
-    cudaDeviceGetAttribute(&clockRateKHz, cudaDevAttrClockRate, 0);
-    float clockRateGHz = clockRateKHz / 1e6;
+    int clockRateKHz = 0;
+    CUDA_CHECK(cudaDeviceGetAttribute(&clockRateKHz, cudaDevAttrClockRate, device));
+    float clockGHz = clockRateKHz / 1e6f;
 
-    // ================== LATENCY ==================
-    printf("### 1. Memory Access Latency (Pointer Chasing)\n");
-    int *d_data, *d_sink;
-    int max_elements = GLOBAL_SIZE_BYTES / sizeof(int);
-    CHECK_CUDA(cudaMalloc(&d_data, GLOBAL_SIZE_BYTES));
-    CHECK_CUDA(cudaMalloc(&d_sink, sizeof(int)));
-    int* h_data = new int[max_elements];
+    printf("GPU Model: %s\n", prop.name);
+    printf("Clock frequency: %.2f GHz\n", clockGHz);
+    printf("SM count: %d\n", prop.multiProcessorCount);
+    printf("===== Profiling ======\n");
 
-    // L1 Test (Small array, hit L1)
-    int l1_elements = L1_SIZE_BYTES / sizeof(int);
-    init_stride_array(h_data, l1_elements, 1);
-    cudaMemcpy(d_data, h_data, L1_SIZE_BYTES, cudaMemcpyHostToDevice);
-    latency_kernel<<<1, 1>>>(d_data, d_sink, L1_SIZE_BYTES);
+    // Allocate and initialize the L1-resident pointer-chase array.
+    const size_t l1Bytes = static_cast<size_t>(L1_ELEMS) * sizeof(int);
+    const size_t l2Bytes = static_cast<size_t>(L2_ELEMS) * sizeof(int);
+    const size_t dramBytes = static_cast<size_t>(DRAM_ELEMS) * sizeof(int);
 
-    // L2 Test (Medium array, miss L1, hit L2)
-    int l2_elements = L2_SIZE_BYTES / sizeof(int);
-    init_stride_array(h_data, l2_elements, 16); // Stride to ensure cache lines are jumped
-    cudaMemcpy(d_data, h_data, L2_SIZE_BYTES, cudaMemcpyHostToDevice);
-    latency_kernel<<<1, 1>>>(d_data, d_sink, L2_SIZE_BYTES);
+    int* d_data = nullptr;
+    int* d_sink = nullptr;
+    long long* d_result = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_data, l1Bytes));
+    CUDA_CHECK(cudaMalloc(&d_result, sizeof(long long)));
+    CUDA_CHECK(cudaMalloc(&d_sink, sizeof(int)));
 
-    // Global Test (Large array, miss L2)
-    init_stride_array(h_data, max_elements, 32); 
-    cudaMemcpy(d_data, h_data, GLOBAL_SIZE_BYTES, cudaMemcpyHostToDevice);
-    latency_kernel<<<1, 1>>>(d_data, d_sink, GLOBAL_SIZE_BYTES);
-    CHECK_CUDA(cudaDeviceSynchronize());
+    int* h_data = static_cast<int*>(malloc(l1Bytes));
+    init_stride_cycle(h_data, L1_ELEMS, 2);
+    CUDA_CHECK(cudaMemcpy(d_data, h_data, l1Bytes, cudaMemcpyHostToDevice));
+    free(h_data);
 
-    // ================== BANDWIDTH ==================
-    printf("\n### 2. Global Memory Bandwidth\n");
-    int4 *d_src_v, *d_dst_v;
-    size_t bw_size = 1024 * 1024 * 1024; // 1GB
-    long long n_vectors = bw_size / sizeof(int4);
-    CHECK_CUDA(cudaMalloc(&d_src_v, bw_size));
-    CHECK_CUDA(cudaMalloc(&d_dst_v, bw_size));
-    
-    // Warmup
-    bandwidth_kernel<<<1024, 256>>>(d_src_v, d_dst_v, n_vectors); 
-    cudaDeviceSynchronize();
+    long long h_result = 0;
 
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start); cudaEventCreate(&stop);
-    
-    cudaEventRecord(start);
-    bandwidth_kernel<<<80*114, 256>>>(d_src_v, d_dst_v, n_vectors); // Saturation grid
-    cudaEventRecord(stop);
-    cudaDeviceSynchronize();
-    
-    float ms = 0;
-    cudaEventElapsedTime(&ms, start, stop);
-    // 2x because Read + Write
-    printf("  Global Bandwidth: %.2f GB/s\n", (bw_size * 2.0) / (ms * 1e6));
+    CUDA_CHECK(cudaMemset(d_result, 0, sizeof(long long)));
+    CUDA_CHECK(cudaMemset(d_sink, 0, sizeof(int)));
+    read_latency_kernel<<<1, 1>>>(d_data, LATENCY_ITERS, d_result, d_sink);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(&h_result, d_result, sizeof(long long), cudaMemcpyDeviceToHost));
+    double l1Latency = static_cast<double>(h_result) / LATENCY_ITERS;
 
-    // ================== CLUSTER ==================
-    // Only runs if CC >= 9.0
+    // Repeat the same pattern with a larger array to force L2 hits.
+    int* d_l2_data = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_l2_data, l2Bytes));
+    int* h_l2 = static_cast<int*>(malloc(l2Bytes));
+    init_stride_cycle(h_l2, L2_ELEMS, 2);
+    CUDA_CHECK(cudaMemcpy(d_l2_data, h_l2, l2Bytes, cudaMemcpyHostToDevice));
+    free(h_l2);
+
+    CUDA_CHECK(cudaMemset(d_result, 0, sizeof(long long)));
+    CUDA_CHECK(cudaMemset(d_sink, 0, sizeof(int)));
+    l2_read_latency_kernel<<<1, 1>>>(d_l2_data, LATENCY_ITERS, d_result, d_sink);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(&h_result, d_result, sizeof(long long), cudaMemcpyDeviceToHost));
+    double l2Latency = static_cast<double>(h_result) / LATENCY_ITERS;
+
+    // Use a working set larger than L2, plus an explicit cache flush, to bias
+    // the pointer chase toward DRAM service.
+    int* d_dram_data = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_dram_data, dramBytes));
+    int* h_dram = static_cast<int*>(malloc(dramBytes));
+    init_stride_cycle(h_dram, DRAM_ELEMS, DRAM_STRIDE);
+    CUDA_CHECK(cudaMemcpy(d_dram_data, h_dram, dramBytes, cudaMemcpyHostToDevice));
+    free(h_dram);
+
+    {
+        constexpr size_t FLUSH_BYTES = 200ULL * 1024 * 1024;
+        int* d_flush = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_flush, FLUSH_BYTES));
+        CUDA_CHECK(cudaMemset(d_flush, 0, FLUSH_BYTES));
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaFree(d_flush));
+    }
+
+    CUDA_CHECK(cudaMemset(d_result, 0, sizeof(long long)));
+    CUDA_CHECK(cudaMemset(d_sink, 0, sizeof(int)));
+    dram_read_latency_kernel<<<1, 1>>>(d_dram_data, LATENCY_ITERS, d_result, d_sink);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(&h_result, d_result, sizeof(long long), cudaMemcpyDeviceToHost));
+    double dramLatency = static_cast<double>(h_result) / LATENCY_ITERS;
+
+    printf("L1 read latency   : %.2f cycles (%.2f ns)\n", l1Latency, l1Latency / clockGHz);
+    printf("L2 read latency   : %.2f cycles (%.2f ns)\n", l2Latency, l2Latency / clockGHz);
+    printf("DRAM read latency : %.2f cycles (%.2f ns)\n", dramLatency, dramLatency / clockGHz);
+
+    // Launch one block per SM, each block reusing its own small region so the
+    // traffic mostly stays in the local L1 and can be normalized per SM.
+    const int l1BwBlocks = prop.multiProcessorCount;
+    const size_t l1BwTotalBytes = static_cast<size_t>(l1BwBlocks) * l1Bytes;
+    const int l1VectorsPerBlock = L1_ELEMS / 4;
+    int4* d_l1_bw_data = nullptr;
+    int* d_l1_bw_sink = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_l1_bw_data, l1BwTotalBytes));
+    CUDA_CHECK(cudaMalloc(&d_l1_bw_sink, static_cast<size_t>(l1BwBlocks) * BW_BLOCK_SIZE * sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_l1_bw_data, 1, l1BwTotalBytes));
+
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop = nullptr;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    l1_bandwidth_kernel<<<l1BwBlocks, BW_BLOCK_SIZE>>>(d_l1_bw_data, l1VectorsPerBlock, 8, d_l1_bw_sink);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaEventRecord(start));
+    l1_bandwidth_kernel<<<l1BwBlocks, BW_BLOCK_SIZE>>>(
+        d_l1_bw_data,
+        l1VectorsPerBlock,
+        L1_BW_REPEATS,
+        d_l1_bw_sink);
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float l1BwMs = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&l1BwMs, start, stop));
+    double l1BwCycles = elapsed_cycles(l1BwMs, clockRateKHz);
+    double l1Bandwidth =
+        (static_cast<double>(l1BwTotalBytes) * L1_BW_REPEATS) /
+        (l1BwCycles * l1BwBlocks);
+
+    // Sweep a larger shared working set with .cg loads to estimate aggregate L2 throughput.
+    const int l2BwBlocks = prop.multiProcessorCount * 8;
+    const long long l2BwVectors = static_cast<long long>(l2Bytes / sizeof(int4));
+    int4* d_l2_bw_data = nullptr;
+    int* d_l2_bw_sink = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_l2_bw_data, l2Bytes));
+    CUDA_CHECK(cudaMalloc(&d_l2_bw_sink, static_cast<size_t>(l2BwBlocks) * BW_BLOCK_SIZE * sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_l2_bw_data, 2, l2Bytes));
+
+    l2_bandwidth_kernel<<<l2BwBlocks, BW_BLOCK_SIZE>>>(d_l2_bw_data, l2BwVectors, 8, d_l2_bw_sink);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaEventRecord(start));
+    l2_bandwidth_kernel<<<l2BwBlocks, BW_BLOCK_SIZE>>>(d_l2_bw_data, l2BwVectors, L2_BW_REPEATS, d_l2_bw_sink);
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float l2BwMs = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&l2BwMs, start, stop));
+    double l2BwCycles = elapsed_cycles(l2BwMs, clockRateKHz);
+    double l2Bandwidth = (static_cast<double>(l2Bytes) * L2_BW_REPEATS) / l2BwCycles;
+
+    // Use a read+write copy over a DRAM-sized buffer for sustained memory bandwidth.
+    int4* d_dram_src = nullptr;
+    int4* d_dram_dst = nullptr;
+    const long long dramBwVectors = static_cast<long long>(dramBytes / sizeof(int4));
+    const int dramBwBlocks = prop.multiProcessorCount * 8;
+    CUDA_CHECK(cudaMalloc(&d_dram_src, dramBytes));
+    CUDA_CHECK(cudaMalloc(&d_dram_dst, dramBytes));
+    CUDA_CHECK(cudaMemset(d_dram_src, 3, dramBytes));
+
+    dram_bandwidth_kernel<<<dramBwBlocks, BW_BLOCK_SIZE>>>(d_dram_src, d_dram_dst, dramBwVectors);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaEventRecord(start));
+    dram_bandwidth_kernel<<<dramBwBlocks, BW_BLOCK_SIZE>>>(d_dram_src, d_dram_dst, dramBwVectors);
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float dramBwMs = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&dramBwMs, start, stop));
+    double dramBandwidth = (2.0 * static_cast<double>(dramBytes)) / (dramBwMs * 1e6);
+
+    printf("L1 cache bandwidth      : %.2f B/cycle/SM\n", l1Bandwidth);
+    printf("L2 cache bandwidth      : %.2f B/cycle\n", l2Bandwidth);
+    printf("Global memory bandwidth : %.2f GB/s\n", dramBandwidth);
+
+    // Launch a fixed 2-block cluster only on architectures that support DSMEM.
+    // The kernel itself prints the inter-SM metrics because the measurements are
+    // collected directly with clock64() inside the cluster execution context.
     if (prop.major >= 9) {
-        printf("\n### 3. Cluster / DSMEM Network (Inter-SM)\n");
-        // Launch 2 blocks (dimension of cluster)
-        // Shared mem size: 4KB
-        int smem_size = 4096; 
-        
-        // Use cudaLaunchKernelEx to strictly launch a cluster
-        cudaLaunchConfig_t config = {0};
-        config.gridDim = 2; // 2 blocks total
-        config.blockDim = 1024;
-        config.dynamicSmemBytes = smem_size;
-        
-        // Setup Cluster Attribute
+        CUDA_CHECK(cudaMemset(d_sink, 0, sizeof(int)));
+
+        cudaLaunchConfig_t config = {};
+        config.gridDim = dim3(2, 1, 1);
+        config.blockDim = dim3(1024, 1, 1);
+        config.dynamicSmemBytes = DSMEM_SHARED_BYTES;
+
         cudaLaunchAttribute attribute[1];
         attribute[0].id = cudaLaunchAttributeClusterDimension;
-        attribute[0].val.clusterDim.x = 2; // Cluster size 2
+        attribute[0].val.clusterDim.x = 2;
         attribute[0].val.clusterDim.y = 1;
         attribute[0].val.clusterDim.z = 1;
         config.attrs = attribute;
         config.numAttrs = 1;
 
-        cudaLaunchKernelEx(&config, cluster_bench, d_sink);
-        CHECK_CUDA(cudaDeviceSynchronize());
+        printf("DSMEM write latency     : not reported (remote stores are fire-and-forget, so a pure per-store latency needs a completion handshake that changes the metric)\n");
+        CUDA_CHECK(cudaLaunchKernelEx(&config, cluster_bench, d_sink));
+        CUDA_CHECK(cudaDeviceSynchronize());
     } else {
-        printf("\n[Skipped] Cluster benchmarks require Compute Capability 9.0+\n");
+        printf("Inter-SM DSMEM benchmarks skipped (requires Compute Capability 9.0+).\n");
     }
 
-    // ================== CLUSTER SCALING ==================
-    if (prop.major >= 9) {
-        printf("\n### 3. Cluster Scaling Benchmarks\n");
-        
-        int smem_size = 4096;
-        int num_iters = 1000;
-        
-        // Define sizes to test. Note: Size 16 is max for H100/Blackwell.
-        // Size 1 is usually invalid for "inter-SM" tests.
-        std::vector<int> cluster_sizes = {2, 4, 8};
+    printf("==================== SUMMARY ====================\n");
+    printf("L1   read latency       : %8.2f cycles\n", l1Latency);
+    printf("L2   read latency       : %8.2f cycles\n", l2Latency);
+    printf("DRAM read latency       : %8.2f cycles\n", dramLatency);
+    printf("L1   bandwidth          : %8.2f B/cycle/SM\n", l1Bandwidth);
+    printf("L2   bandwidth          : %8.2f B/cycle\n", l2Bandwidth);
+    printf("DRAM bandwidth          : %8.2f GB/s\n", dramBandwidth);
+    printf("=================================================\n");
 
-        for (int size : cluster_sizes) {
-            // Check if hardware supports this cluster size
-            if (size > prop.maxThreadsPerMultiProcessor / 1024 * prop.multiProcessorCount) { 
-                // Simple sanity check, though cudaLaunchKernelEx handles validation better
-                continue; 
-            }
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_data));
+    CUDA_CHECK(cudaFree(d_result));
+    CUDA_CHECK(cudaFree(d_sink));
+    CUDA_CHECK(cudaFree(d_l2_data));
+    CUDA_CHECK(cudaFree(d_dram_data));
+    CUDA_CHECK(cudaFree(d_l1_bw_data));
+    CUDA_CHECK(cudaFree(d_l1_bw_sink));
+    CUDA_CHECK(cudaFree(d_l2_bw_data));
+    CUDA_CHECK(cudaFree(d_l2_bw_sink));
+    CUDA_CHECK(cudaFree(d_dram_src));
+    CUDA_CHECK(cudaFree(d_dram_dst));
 
-            cudaLaunchConfig_t config = {0};
-            // Grid dimension must be a multiple of cluster size
-            config.gridDim = size;  
-            config.blockDim = 1024;
-            config.dynamicSmemBytes = smem_size;
-
-            cudaLaunchAttribute attribute[1];
-            attribute[0].id = cudaLaunchAttributeClusterDimension;
-            attribute[0].val.clusterDim.x = size;
-            attribute[0].val.clusterDim.y = 1;
-            attribute[0].val.clusterDim.z = 1;
-            config.attrs = attribute;
-            config.numAttrs = 1;
-
-            // Launch
-            cudaError_t err = cudaLaunchKernelEx(&config, myClusterScaling, d_sink, num_iters);
-            
-            if (err != cudaSuccess) {
-                printf("[Skipped] Cluster Size %d failed to launch: %s\n", size, cudaGetErrorString(err));
-            } else {
-                CHECK_CUDA(cudaDeviceSynchronize());
-            }
-        }
-    }
-
-    // Cleanup
-    cudaFree(d_data); cudaFree(d_sink); cudaFree(d_src_v); cudaFree(d_dst_v);
-    delete[] h_data;
     return 0;
 }
