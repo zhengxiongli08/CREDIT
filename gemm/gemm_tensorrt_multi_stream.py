@@ -20,8 +20,8 @@ class FFN(nn.Module):
 
 
 def export_onnx(m, k, n):
-    model = FFN(k, n).cuda().eval()
-    dummy_input = torch.randn(m, k, device="cuda", dtype=torch.float32)
+    model = FFN(k, n).cuda().half().eval()
+    dummy_input = torch.randn(m, k, device="cuda", dtype=torch.float16)
     buf = io.BytesIO()
     torch.onnx.export(
         model,
@@ -40,7 +40,7 @@ def build_engine(onnx_bytes):
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
     parser = trt.OnnxParser(network, logger)
     config = builder.create_builder_config()
-    # Use FP32 kernels for lower arithmetic intensity
+    config.set_flag(trt.BuilderFlag.FP16)
 
     if not parser.parse(onnx_bytes):
         for i in range(parser.num_errors):

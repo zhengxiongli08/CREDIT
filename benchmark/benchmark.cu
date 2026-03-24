@@ -499,8 +499,7 @@ int main() {
         attribute[0].val.clusterDim.z = 1;
         config.attrs = attribute;
         config.numAttrs = 1;
-
-        printf("DSMEM write latency     : not reported (remote stores are fire-and-forget, so a pure per-store latency needs a completion handshake that changes the metric)\n");
+        
         CUDA_CHECK(cudaLaunchKernelEx(&config, cluster_bench, d_sink));
         CUDA_CHECK(cudaDeviceSynchronize());
     } else {
