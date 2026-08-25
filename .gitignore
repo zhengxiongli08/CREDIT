@@ -5,5 +5,16 @@ results/
 .clangd
 .clang-format
 ClusterFusion/
+quack/
 __pycache__/
 agents/
+.codex
+HPEC-Draft/
+
+# Keep the paper's compact, reproducible RTX 5090 evidence bundle.
+!evaluation/results/
+evaluation/results/*
+!evaluation/results/rtx5090/
+!evaluation/results/rtx5090/*.csv
+!evaluation/results/rtx5090/*.json
+!evaluation/results/rtx5090/*.md

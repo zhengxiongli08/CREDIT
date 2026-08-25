@@ -8,8 +8,10 @@ Global memory bandwidth: 1.79TB/s
 
 #include <cooperative_groups.h>
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <stdio.h>
 #include <stdlib.h>
+#include <vector>
 
 namespace cg = cooperative_groups;
 
@@ -174,131 +176,436 @@ __global__ void dram_bandwidth_kernel(
     }
 }
 
-// Inter-SM DSMEM microbenchmark for a fixed 2-block cluster.
-//
-// Block rank 0 acts as the requester and block rank 1 provides the remote
-// shared memory backing store. The kernel measures four behaviors:
-// 1) cluster.sync() overhead,
-// 2) remote shared-memory writes (push bandwidth),
-// 3) remote shared-memory reads (pull bandwidth),
-// 4) serialized remote pointer-chase reads (pull latency).
-//
-// Note that remote write latency is intentionally not measured. DSMEM stores
-// are fire-and-forget, so observing an individual store's completion requires
-// an acknowledgment path or barrier, which would change the metric into a
-// round-trip synchronization cost rather than a pure write latency.
-__global__ void __cluster_dims__(2, 1, 1) cluster_bench(int* dump_sink) {
-    // Form a two-block cluster and identify which block is local vs remote.
+constexpr int DSMEM_BLOCK_SIZE = 256;
+constexpr int DSMEM_PAYLOAD_WORDS = 4096;
+constexpr int DSMEM_TRIALS = 15;
+constexpr int DSMEM_SYNC_ITERS = 1000;
+constexpr int DSMEM_LATENCY_ITERS = 20000;
+constexpr int DSMEM_LATENCY_WARMUP = 4096;
+constexpr int DSMEM_THROUGHPUT_ITERS = 4096;
+constexpr int DSMEM_VISIBILITY_ITERS = 1000;
+constexpr int DSMEM_VISIBILITY_WARMUP = 100;
+constexpr int DSMEM_WARPS = DSMEM_BLOCK_SIZE / 32;
+
+enum DsmemMetric {
+    DSMEM_METRIC_SYNC = 0,
+    DSMEM_METRIC_READ_LATENCY,
+    DSMEM_METRIC_THROUGHPUT,
+    DSMEM_METRIC_VISIBILITY,
+    DSMEM_METRIC_COUNT
+};
+
+struct DsmemResults {
+    unsigned long long sync_cycles[DSMEM_TRIALS];
+    unsigned long long local_read_latency_cycles[DSMEM_TRIALS];
+    unsigned long long remote_read_latency_cycles[DSMEM_TRIALS];
+    unsigned long long local_read_throughput_cycles[DSMEM_TRIALS];
+    unsigned long long remote_read_throughput_cycles[DSMEM_TRIALS];
+    unsigned long long local_store_throughput_cycles[DSMEM_TRIALS];
+    unsigned long long remote_store_throughput_cycles[DSMEM_TRIALS];
+    unsigned long long visibility_roundtrip_cycles[DSMEM_TRIALS];
+    unsigned int sm_id[DSMEM_METRIC_COUNT][2];
+};
+
+__device__ __forceinline__ unsigned int current_smid() {
+    unsigned int smid;
+    asm volatile("mov.u32 %0, %%smid;" : "=r"(smid));
+    return smid;
+}
+
+__device__ __forceinline__ int dsmem_load(const int* address) {
+    int value;
+    asm volatile("ld.u32 %0, [%1];"
+                 : "=r"(value)
+                 : "l"(address)
+                 : "memory");
+    return value;
+}
+
+__device__ __forceinline__ void dsmem_store(int* address, int value) {
+    asm volatile("st.u32 [%0], %1;"
+                 :
+                 : "l"(address), "r"(value)
+                 : "memory");
+}
+
+__device__ __forceinline__ void record_cluster_placement(
+    DsmemResults* results,
+    int metric,
+    unsigned int rank)
+{
+    if (threadIdx.x == 0) {
+        results->sm_id[metric][rank] = current_smid();
+    }
+}
+
+__global__ void __cluster_dims__(2, 1, 1) dsmem_sync_bench(DsmemResults* results) {
     cg::cluster_group cluster = cg::this_cluster();
     unsigned int rank = cluster.block_rank();
-
-    // payload_ints is the amount of DSMEM traffic per loop iteration.
-    // bandwidth_iters increases the total bytes moved so timing noise is small.
-    // latency_iters keeps the pointer chase long enough to average the result.
-    constexpr int payload_ints = 1024;
-    constexpr int bandwidth_iters = 1000;
-    constexpr int latency_iters = 100000;
-
-    // Each block exposes its local shared memory to the cluster. Rank 0 maps
-    // rank 1's shared memory and rank 1 maps rank 0's shared memory, although
-    // only rank 0 actively uses the remote mapping for measurement here.
     extern __shared__ int local_smem[];
-    int* remote_smem = cluster.map_shared_rank(local_smem, 1 - rank);
 
-    // Measure the cost of a single cluster-wide barrier.
-    if (threadIdx.x == 0 && rank == 0) {
-        long long start = clock64();
-        cluster.sync();
-        long long end = clock64();
-        printf("----- Inter-SM DSMEM (clusterDim=2) -----\n");
-        printf("Cluster sync overhead   : %lld cycles\n", end - start);
-    } else {
-        cluster.sync();
-    }
-
-    // Push benchmark: rank 0 writes directly into rank 1's shared memory.
-    // The measured time includes the transfer plus the final cluster barrier
-    // that ensures all remote writes are visible before reporting bandwidth.
-    if (rank == 0) {
-        long long start = clock64();
-
-        #pragma unroll
-        for (int iter = 0; iter < bandwidth_iters; ++iter) {
-            if (threadIdx.x < payload_ints) {
-                remote_smem[threadIdx.x] = iter;
-            }
-        }
-        cluster.sync();
-        long long end = clock64();
-
-        if (threadIdx.x == 0) {
-            double bytes = static_cast<double>(bandwidth_iters) * payload_ints * sizeof(int);
-            printf("DSMEM write bandwidth   : %.2f B/cycle\n", bytes / static_cast<double>(end - start));
-        }
-    } else {
-        // Rank 1 only participates in the barrier and keeps a side effect so
-        // the compiler cannot treat the remote stores as dead.
-        cluster.sync();
-        if (threadIdx.x == 0) {
-            dump_sink[0] = local_smem[0];
-        }
-    }
-
-    // Prepare rank 1's local shared memory so rank 0 can measure remote reads.
-    if (rank == 1 && threadIdx.x < payload_ints) {
-        local_smem[threadIdx.x] = threadIdx.x;
-    }
-    cluster.sync();
-
-    // Pull benchmark: rank 0 repeatedly reads rank 1's shared memory.
-    // This measures sustained DSMEM read bandwidth rather than single-access
-    // latency because many threads issue reads in parallel.
-    if (rank == 0) {
-        int thread_sum = 0;
-        long long start = clock64();
-
-        #pragma unroll
-        for (int iter = 0; iter < bandwidth_iters; ++iter) {
-            if (threadIdx.x < payload_ints) {
-                thread_sum += remote_smem[threadIdx.x];
-            }
-        }
-
-        cluster.sync();
-        long long end = clock64();
-
-        if (threadIdx.x == 0) {
-            dump_sink[0] = thread_sum;
-            double bytes = static_cast<double>(bandwidth_iters) * payload_ints * sizeof(int);
-            printf("DSMEM read bandwidth    : %.2f B/cycle\n", bytes / static_cast<double>(end - start));
-        }
-    } else {
-        cluster.sync();
-    }
-
-    // Set up a dependent pointer chain in remote shared memory. Each load
-    // determines the next address, so the accesses cannot be pipelined and the
-    // average cycles per iteration approximate remote DSMEM read latency.
     if (threadIdx.x == 0) {
         local_smem[0] = 0;
     }
+    record_cluster_placement(results, DSMEM_METRIC_SYNC, rank);
+
+    #pragma unroll 1
+    for (int i = 0; i < 100; ++i) {
+        cluster.sync();
+    }
+
+    for (int trial = 0; trial < DSMEM_TRIALS; ++trial) {
+        cluster.sync();
+        unsigned long long start = 0;
+        if (rank == 0 && threadIdx.x == 0) {
+            start = clock64();
+        }
+
+        #pragma unroll 1
+        for (int i = 0; i < DSMEM_SYNC_ITERS; ++i) {
+            cluster.sync();
+        }
+
+        if (rank == 0 && threadIdx.x == 0) {
+            results->sync_cycles[trial] = clock64() - start;
+        }
+    }
+}
+
+__global__ void __cluster_dims__(2, 1, 1) dsmem_read_latency_bench(
+    DsmemResults* results,
+    int* dump_sink)
+{
+    cg::cluster_group cluster = cg::this_cluster();
+    unsigned int rank = cluster.block_rank();
+    extern __shared__ int local_storage[];
+    volatile int* local_smem = local_storage;
+    int* remote_smem = cluster.map_shared_rank(local_storage, 1 - rank);
+
+    for (int i = threadIdx.x; i < DSMEM_PAYLOAD_WORDS; i += blockDim.x) {
+        local_storage[i] = (i + 257) & (DSMEM_PAYLOAD_WORDS - 1);
+    }
+    record_cluster_placement(results, DSMEM_METRIC_READ_LATENCY, rank);
     cluster.sync();
 
     if (rank == 0 && threadIdx.x == 0) {
         int ptr = 0;
-        long long start = clock64();
-
         #pragma unroll 1
-        for (int iter = 0; iter < latency_iters; ++iter) {
-            ptr = remote_smem[ptr];
+        for (int i = 0; i < DSMEM_LATENCY_WARMUP; ++i) {
+            ptr = local_smem[ptr];
         }
-
-        long long end = clock64();
         dump_sink[0] = ptr;
-        printf("DSMEM read latency      : %.2f cycles\n", static_cast<double>(end - start) / latency_iters);
-    } else {
+    }
+    cluster.sync();
+
+    for (int trial = 0; trial < DSMEM_TRIALS; ++trial) {
+        if (rank == 0 && threadIdx.x == 0) {
+            int ptr = 0;
+            unsigned long long start = clock64();
+            #pragma unroll 1
+            for (int i = 0; i < DSMEM_LATENCY_ITERS; ++i) {
+                ptr = local_smem[ptr];
+            }
+            results->local_read_latency_cycles[trial] = clock64() - start;
+            dump_sink[0] = ptr;
+        }
         cluster.sync();
     }
+
+    if (rank == 0 && threadIdx.x == 0) {
+        int ptr = 0;
+        #pragma unroll 1
+        for (int i = 0; i < DSMEM_LATENCY_WARMUP; ++i) {
+            ptr = dsmem_load(remote_smem + ptr);
+        }
+        dump_sink[0] = ptr;
+    }
+    cluster.sync();
+
+    for (int trial = 0; trial < DSMEM_TRIALS; ++trial) {
+        if (rank == 0 && threadIdx.x == 0) {
+            int ptr = 0;
+            unsigned long long start = clock64();
+            #pragma unroll 1
+            for (int i = 0; i < DSMEM_LATENCY_ITERS; ++i) {
+                ptr = dsmem_load(remote_smem + ptr);
+            }
+            results->remote_read_latency_cycles[trial] = clock64() - start;
+            dump_sink[0] = ptr;
+        }
+        cluster.sync();
+    }
+}
+
+template <bool Remote>
+__device__ __forceinline__ unsigned long long time_read_throughput(
+    int* data,
+    unsigned long long* warp_start,
+    unsigned long long* warp_end,
+    int* thread_sum)
+{
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int index = threadIdx.x;
+    int sum = 0;
+    unsigned long long start = 0;
+
+    __syncthreads();
+    if (lane == 0) {
+        start = clock64();
+    }
+
+    #pragma unroll 1
+    for (int i = 0; i < DSMEM_THROUGHPUT_ITERS; ++i) {
+        if constexpr (Remote) {
+            sum += dsmem_load(data + index);
+        } else {
+            sum += reinterpret_cast<volatile int*>(data)[index];
+        }
+        index += DSMEM_BLOCK_SIZE;
+        if (index >= DSMEM_PAYLOAD_WORDS) {
+            index = threadIdx.x;
+        }
+    }
+
+    if (lane == 0) {
+        warp_start[warp] = start;
+        warp_end[warp] = clock64();
+    }
+    __syncthreads();
+
+    unsigned long long elapsed = 0;
+    if (threadIdx.x == 0) {
+        unsigned long long first = warp_start[0];
+        unsigned long long last = warp_end[0];
+        for (int warp_id = 1; warp_id < DSMEM_WARPS; ++warp_id) {
+            first = min(first, warp_start[warp_id]);
+            last = max(last, warp_end[warp_id]);
+        }
+        elapsed = last - first;
+    }
+    *thread_sum = sum;
+    return elapsed;
+}
+
+template <bool Remote>
+__device__ __forceinline__ unsigned long long time_store_throughput(
+    int* data,
+    unsigned long long* warp_start,
+    unsigned long long* warp_end)
+{
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int index = threadIdx.x;
+    unsigned long long start = 0;
+
+    __syncthreads();
+    if (lane == 0) {
+        start = clock64();
+    }
+
+    #pragma unroll 1
+    for (int i = 0; i < DSMEM_THROUGHPUT_ITERS; ++i) {
+        if constexpr (Remote) {
+            dsmem_store(data + index, i + threadIdx.x);
+        } else {
+            reinterpret_cast<volatile int*>(data)[index] = i + threadIdx.x;
+        }
+        index += DSMEM_BLOCK_SIZE;
+        if (index >= DSMEM_PAYLOAD_WORDS) {
+            index = threadIdx.x;
+        }
+    }
+
+    if (lane == 0) {
+        warp_start[warp] = start;
+        warp_end[warp] = clock64();
+    }
+    __syncthreads();
+
+    unsigned long long elapsed = 0;
+    if (threadIdx.x == 0) {
+        unsigned long long first = warp_start[0];
+        unsigned long long last = warp_end[0];
+        for (int warp_id = 1; warp_id < DSMEM_WARPS; ++warp_id) {
+            first = min(first, warp_start[warp_id]);
+            last = max(last, warp_end[warp_id]);
+        }
+        elapsed = last - first;
+    }
+    return elapsed;
+}
+
+__global__ void __cluster_dims__(2, 1, 1) dsmem_throughput_bench(
+    DsmemResults* results,
+    int* dump_sink)
+{
+    cg::cluster_group cluster = cg::this_cluster();
+    unsigned int rank = cluster.block_rank();
+    extern __shared__ int local_storage[];
+    int* remote_smem = cluster.map_shared_rank(local_storage, 1 - rank);
+    __shared__ unsigned long long warp_start[DSMEM_WARPS];
+    __shared__ unsigned long long warp_end[DSMEM_WARPS];
+
+    for (int i = threadIdx.x; i < DSMEM_PAYLOAD_WORDS; i += blockDim.x) {
+        local_storage[i] = i + 1;
+    }
+    record_cluster_placement(results, DSMEM_METRIC_THROUGHPUT, rank);
+    cluster.sync();
+
+    for (int trial = 0; trial < DSMEM_TRIALS; ++trial) {
+        if (rank == 0) {
+            int sum = 0;
+            unsigned long long elapsed = time_read_throughput<false>(
+                local_storage, warp_start, warp_end, &sum);
+            dump_sink[threadIdx.x] = sum;
+            if (threadIdx.x == 0) {
+                results->local_read_throughput_cycles[trial] = elapsed;
+            }
+        }
+        cluster.sync();
+    }
+
+    for (int trial = 0; trial < DSMEM_TRIALS; ++trial) {
+        if (rank == 0) {
+            int sum = 0;
+            unsigned long long elapsed = time_read_throughput<true>(
+                remote_smem, warp_start, warp_end, &sum);
+            dump_sink[threadIdx.x] = sum;
+            if (threadIdx.x == 0) {
+                results->remote_read_throughput_cycles[trial] = elapsed;
+            }
+        }
+        cluster.sync();
+    }
+
+    for (int trial = 0; trial < DSMEM_TRIALS; ++trial) {
+        if (rank == 0) {
+            unsigned long long elapsed = time_store_throughput<false>(
+                local_storage, warp_start, warp_end);
+            if (threadIdx.x == 0) {
+                results->local_store_throughput_cycles[trial] = elapsed;
+            }
+        }
+        cluster.sync();
+    }
+
+    for (int trial = 0; trial < DSMEM_TRIALS; ++trial) {
+        if (rank == 0) {
+            unsigned long long elapsed = time_store_throughput<true>(
+                remote_smem, warp_start, warp_end);
+            if (threadIdx.x == 0) {
+                results->remote_store_throughput_cycles[trial] = elapsed;
+            }
+        }
+        cluster.sync();
+    }
+
+    if (rank == 1) {
+        dump_sink[DSMEM_BLOCK_SIZE + threadIdx.x] = local_storage[threadIdx.x];
+    }
+    cluster.sync();
+}
+
+__global__ void __cluster_dims__(2, 1, 1) dsmem_visibility_bench(
+    DsmemResults* results,
+    int* dump_sink)
+{
+    cg::cluster_group cluster = cg::this_cluster();
+    unsigned int rank = cluster.block_rank();
+    extern __shared__ int local_storage[];
+    volatile int* local_smem = local_storage;
+    int* remote_smem = cluster.map_shared_rank(local_storage, 1 - rank);
+    constexpr int request_index = 0;
+    constexpr int acknowledge_index = 1;
+
+    if (threadIdx.x < 2) {
+        local_storage[threadIdx.x] = 0;
+    }
+    record_cluster_placement(results, DSMEM_METRIC_VISIBILITY, rank);
+    cluster.sync();
+
+    if (threadIdx.x == 0) {
+        for (int i = 1; i <= DSMEM_VISIBILITY_WARMUP; ++i) {
+            if (rank == 0) {
+                dsmem_store(remote_smem + request_index, i);
+                while (local_smem[acknowledge_index] != i) {
+                }
+            } else {
+                while (local_smem[request_index] != i) {
+                }
+                dsmem_store(remote_smem + acknowledge_index, i);
+            }
+        }
+    }
+    cluster.sync();
+
+    for (int trial = 0; trial < DSMEM_TRIALS; ++trial) {
+        int first_token = DSMEM_VISIBILITY_WARMUP + trial * DSMEM_VISIBILITY_ITERS + 1;
+        if (threadIdx.x == 0) {
+            unsigned long long start = 0;
+            if (rank == 0) {
+                start = clock64();
+            }
+
+            #pragma unroll 1
+            for (int i = 0; i < DSMEM_VISIBILITY_ITERS; ++i) {
+                int token = first_token + i;
+                if (rank == 0) {
+                    dsmem_store(remote_smem + request_index, token);
+                    while (local_smem[acknowledge_index] != token) {
+                    }
+                } else {
+                    while (local_smem[request_index] != token) {
+                    }
+                    dsmem_store(remote_smem + acknowledge_index, token);
+                }
+            }
+
+            if (rank == 0) {
+                results->visibility_roundtrip_cycles[trial] = clock64() - start;
+                dump_sink[0] = local_smem[acknowledge_index];
+            }
+        }
+        cluster.sync();
+    }
+}
+
+struct MetricSummary {
+    double minimum;
+    double median;
+    double maximum;
+};
+
+MetricSummary summarize_scaled(
+    const unsigned long long* samples,
+    int count,
+    double scale)
+{
+    std::vector<double> values(count);
+    for (int i = 0; i < count; ++i) {
+        values[i] = static_cast<double>(samples[i]) * scale;
+    }
+    std::sort(values.begin(), values.end());
+    return {values.front(), values[count / 2], values.back()};
+}
+
+MetricSummary summarize_throughput(
+    const unsigned long long* samples,
+    int count,
+    double bytes)
+{
+    std::vector<double> values(count);
+    for (int i = 0; i < count; ++i) {
+        values[i] = bytes / static_cast<double>(samples[i]);
+    }
+    std::sort(values.begin(), values.end());
+    return {values.front(), values[count / 2], values.back()};
+}
+
+void print_metric(const char* label, const char* unit, const MetricSummary& summary) {
+    printf("%-34s : %9.2f %s  (min %.2f, max %.2f)\n",
+           label, summary.median, unit, summary.minimum, summary.maximum);
 }
 
 int main() {
@@ -306,12 +613,12 @@ int main() {
     constexpr int L1_ELEMS = 1 << 13;
     constexpr int L2_ELEMS = 1 << 21;
     constexpr int DRAM_ELEMS = 1 << 26;
+    constexpr int CACHE_LATENCY_STRIDE = 257;
     constexpr int DRAM_STRIDE = L2_ELEMS + 1;
     constexpr int LATENCY_ITERS = 100000;
     constexpr int L1_BW_REPEATS = 4096;
     constexpr int L2_BW_REPEATS = 1024;
     constexpr int BW_BLOCK_SIZE = 256;
-    constexpr int DSMEM_SHARED_BYTES = 1024 * sizeof(int);
 
     // Query device properties once so the same clock rate is reused for all reports.
     constexpr int device = 0;
@@ -342,12 +649,15 @@ int main() {
     CUDA_CHECK(cudaMalloc(&d_sink, sizeof(int)));
 
     int* h_data = static_cast<int*>(malloc(l1Bytes));
-    init_stride_cycle(h_data, L1_ELEMS, 2);
+    init_stride_cycle(h_data, L1_ELEMS, CACHE_LATENCY_STRIDE);
     CUDA_CHECK(cudaMemcpy(d_data, h_data, l1Bytes, cudaMemcpyHostToDevice));
     free(h_data);
 
     long long h_result = 0;
 
+    read_latency_kernel<<<1, 1>>>(
+        d_data, L1_ELEMS, d_result, d_sink);
+    CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaMemset(d_result, 0, sizeof(long long)));
     CUDA_CHECK(cudaMemset(d_sink, 0, sizeof(int)));
     read_latency_kernel<<<1, 1>>>(d_data, LATENCY_ITERS, d_result, d_sink);
@@ -359,10 +669,13 @@ int main() {
     int* d_l2_data = nullptr;
     CUDA_CHECK(cudaMalloc(&d_l2_data, l2Bytes));
     int* h_l2 = static_cast<int*>(malloc(l2Bytes));
-    init_stride_cycle(h_l2, L2_ELEMS, 2);
+    init_stride_cycle(h_l2, L2_ELEMS, CACHE_LATENCY_STRIDE);
     CUDA_CHECK(cudaMemcpy(d_l2_data, h_l2, l2Bytes, cudaMemcpyHostToDevice));
     free(h_l2);
 
+    l2_read_latency_kernel<<<1, 1>>>(
+        d_l2_data, L2_ELEMS, d_result, d_sink);
+    CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaMemset(d_result, 0, sizeof(long long)));
     CUDA_CHECK(cudaMemset(d_sink, 0, sizeof(int)));
     l2_read_latency_kernel<<<1, 1>>>(d_l2_data, LATENCY_ITERS, d_result, d_sink);
@@ -481,27 +794,180 @@ int main() {
     printf("L2 cache bandwidth      : %.2f B/cycle\n", l2Bandwidth);
     printf("Global memory bandwidth : %.2f GB/s\n", dramBandwidth);
 
-    // Launch a fixed 2-block cluster only on architectures that support DSMEM.
-    // The kernel itself prints the inter-SM metrics because the measurements are
-    // collected directly with clock64() inside the cluster execution context.
-    if (prop.major >= 9) {
-        CUDA_CHECK(cudaMemset(d_sink, 0, sizeof(int)));
+    int clusterLaunchSupported = 0;
+    CUDA_CHECK(cudaDeviceGetAttribute(
+        &clusterLaunchSupported, cudaDevAttrClusterLaunch, device));
 
-        cudaLaunchConfig_t config = {};
-        config.gridDim = dim3(2, 1, 1);
-        config.blockDim = dim3(1024, 1, 1);
-        config.dynamicSmemBytes = DSMEM_SHARED_BYTES;
+    if (clusterLaunchSupported) {
+        const size_t payloadSharedBytes = DSMEM_PAYLOAD_WORDS * sizeof(int);
+        const size_t halfSmSharedBytes =
+            static_cast<size_t>(prop.sharedMemPerMultiprocessor) / 2;
+        const size_t forceOneBlockBytes =
+            ((halfSmSharedBytes + 256) / 256) * 256;
+        const size_t maxOptinSharedBytes = prop.sharedMemPerBlockOptin > 0
+            ? static_cast<size_t>(prop.sharedMemPerBlockOptin)
+            : static_cast<size_t>(prop.sharedMemPerBlock);
+        const size_t throughputStaticSharedBytes =
+            2 * DSMEM_WARPS * sizeof(unsigned long long);
+        const size_t maxDynamicSharedBytes = maxOptinSharedBytes > throughputStaticSharedBytes
+            ? maxOptinSharedBytes - throughputStaticSharedBytes
+            : 0;
+        size_t dsmemSharedBytes = payloadSharedBytes;
+        bool forcedOneBlockPerSm = false;
 
-        cudaLaunchAttribute attribute[1];
-        attribute[0].id = cudaLaunchAttributeClusterDimension;
-        attribute[0].val.clusterDim.x = 2;
-        attribute[0].val.clusterDim.y = 1;
-        attribute[0].val.clusterDim.z = 1;
-        config.attrs = attribute;
-        config.numAttrs = 1;
-        
-        CUDA_CHECK(cudaLaunchKernelEx(&config, cluster_bench, d_sink));
+        if (forceOneBlockBytes >= payloadSharedBytes &&
+            forceOneBlockBytes <= maxDynamicSharedBytes) {
+            dsmemSharedBytes = forceOneBlockBytes;
+            forcedOneBlockPerSm = true;
+        }
+
+        DsmemResults* d_dsmem_results = nullptr;
+        int* d_dsmem_sink = nullptr;
+        DsmemResults h_dsmem_results = {};
+        CUDA_CHECK(cudaMalloc(&d_dsmem_results, sizeof(DsmemResults)));
+        CUDA_CHECK(cudaMalloc(
+            &d_dsmem_sink, 2 * DSMEM_BLOCK_SIZE * sizeof(int)));
+        CUDA_CHECK(cudaMemset(d_dsmem_results, 0, sizeof(DsmemResults)));
+        CUDA_CHECK(cudaMemset(
+            d_dsmem_sink, 0, 2 * DSMEM_BLOCK_SIZE * sizeof(int)));
+
+        CUDA_CHECK(cudaFuncSetAttribute(
+            dsmem_sync_bench,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            static_cast<int>(dsmemSharedBytes)));
+        CUDA_CHECK(cudaFuncSetAttribute(
+            dsmem_read_latency_bench,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            static_cast<int>(dsmemSharedBytes)));
+        CUDA_CHECK(cudaFuncSetAttribute(
+            dsmem_throughput_bench,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            static_cast<int>(dsmemSharedBytes)));
+        CUDA_CHECK(cudaFuncSetAttribute(
+            dsmem_visibility_bench,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            static_cast<int>(dsmemSharedBytes)));
+
+        dsmem_sync_bench<<<2, DSMEM_BLOCK_SIZE, dsmemSharedBytes>>>(
+            d_dsmem_results);
+        CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
+
+        dsmem_read_latency_bench<<<2, DSMEM_BLOCK_SIZE, dsmemSharedBytes>>>(
+            d_dsmem_results, d_dsmem_sink);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        dsmem_throughput_bench<<<2, DSMEM_BLOCK_SIZE, dsmemSharedBytes>>>(
+            d_dsmem_results, d_dsmem_sink);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        dsmem_visibility_bench<<<2, DSMEM_BLOCK_SIZE, dsmemSharedBytes>>>(
+            d_dsmem_results, d_dsmem_sink);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        CUDA_CHECK(cudaMemcpy(
+            &h_dsmem_results,
+            d_dsmem_results,
+            sizeof(DsmemResults),
+            cudaMemcpyDeviceToHost));
+
+        printf("----- Inter-SM DSMEM (2 CTAs, %d threads/CTA) -----\n",
+               DSMEM_BLOCK_SIZE);
+        printf("Dynamic shared memory/CTA         : %zu bytes%s\n",
+               dsmemSharedBytes,
+               forcedOneBlockPerSm ? " (forces <=1 CTA/SM)" : "");
+
+        const char* metricNames[DSMEM_METRIC_COUNT] = {
+            "cluster sync", "read latency", "throughput", "visibility"
+        };
+        bool placementValid = true;
+        for (int metric = 0; metric < DSMEM_METRIC_COUNT; ++metric) {
+            unsigned int requesterSm = h_dsmem_results.sm_id[metric][0];
+            unsigned int providerSm = h_dsmem_results.sm_id[metric][1];
+            printf("%-34s : SM %u -> SM %u\n",
+                   metricNames[metric], requesterSm, providerSm);
+            placementValid &= requesterSm != providerSm;
+        }
+        if (!placementValid) {
+            fprintf(stderr,
+                    "WARNING: at least one DSMEM sample used two CTAs on the same SM; "
+                    "do not treat that sample as inter-SM.\n");
+        }
+
+        print_metric(
+            "Cluster sync latency",
+            "cycles/sync",
+            summarize_scaled(
+                h_dsmem_results.sync_cycles,
+                DSMEM_TRIALS,
+                1.0 / DSMEM_SYNC_ITERS));
+        print_metric(
+            "Local SMEM read latency",
+            "cycles/load",
+            summarize_scaled(
+                h_dsmem_results.local_read_latency_cycles,
+                DSMEM_TRIALS,
+                1.0 / DSMEM_LATENCY_ITERS));
+        print_metric(
+            "DSMEM read latency",
+            "cycles/load",
+            summarize_scaled(
+                h_dsmem_results.remote_read_latency_cycles,
+                DSMEM_TRIALS,
+                1.0 / DSMEM_LATENCY_ITERS));
+
+        const double throughputBytes =
+            static_cast<double>(DSMEM_BLOCK_SIZE) *
+            DSMEM_THROUGHPUT_ITERS * sizeof(int);
+        print_metric(
+            "Local SMEM read throughput",
+            "B/cycle/CTA",
+            summarize_throughput(
+                h_dsmem_results.local_read_throughput_cycles,
+                DSMEM_TRIALS,
+                throughputBytes));
+        print_metric(
+            "DSMEM read throughput",
+            "B/cycle/CTA",
+            summarize_throughput(
+                h_dsmem_results.remote_read_throughput_cycles,
+                DSMEM_TRIALS,
+                throughputBytes));
+        print_metric(
+            "Local SMEM store throughput",
+            "B/cycle/CTA",
+            summarize_throughput(
+                h_dsmem_results.local_store_throughput_cycles,
+                DSMEM_TRIALS,
+                throughputBytes));
+        print_metric(
+            "DSMEM store issue throughput",
+            "B/cycle/CTA",
+            summarize_throughput(
+                h_dsmem_results.remote_store_throughput_cycles,
+                DSMEM_TRIALS,
+                throughputBytes));
+
+        MetricSummary visibilityRoundtrip = summarize_scaled(
+            h_dsmem_results.visibility_roundtrip_cycles,
+            DSMEM_TRIALS,
+            1.0 / DSMEM_VISIBILITY_ITERS);
+        print_metric(
+            "Store visibility round trip",
+            "cycles/roundtrip",
+            visibilityRoundtrip);
+        print_metric(
+            "One-way visibility estimate",
+            "cycles",
+            {visibilityRoundtrip.minimum / 2.0,
+             visibilityRoundtrip.median / 2.0,
+             visibilityRoundtrip.maximum / 2.0});
+
+        CUDA_CHECK(cudaFree(d_dsmem_results));
+        CUDA_CHECK(cudaFree(d_dsmem_sink));
     } else {
         printf("Inter-SM DSMEM benchmarks skipped (requires Compute Capability 9.0+).\n");
     }

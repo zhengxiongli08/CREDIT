@@ -1,0 +1,104 @@
+{
+  "timestamp_unix": 1783935415.6412838,
+  "elapsed_seconds": 320.54656887054443,
+  "summary_timestamp_unix": 1783936453.1727896,
+  "summary_elapsed_seconds": 0.004949092864990234,
+  "summary_rebuilt_from_checkpoints": true,
+  "device": "NVIDIA GeForce RTX 5090",
+  "compute_capability": [
+    12,
+    0
+  ],
+  "torch_version": "2.11.0+cu130",
+  "triton_version": "3.6.0",
+  "profile": {
+    "name": "NVIDIA GeForce RTX 5090",
+    "sm_count": 170,
+    "clock_ghz": 2.41,
+    "hbm_bandwidth_gbps": 1487.61,
+    "l2_capacity_bytes": 100663296,
+    "l2_bandwidth_gbps": 6764.9182,
+    "local_smem_bytes_per_cycle_cta": 20.89,
+    "dsmem_store_bytes_per_cycle_cta": 2.14,
+    "max_shared_bytes_per_cta": 101376,
+    "local_smem_store_bytes_per_cycle_cta": 33.01
+  },
+  "warmup": 20,
+  "iterations": 100,
+  "trials": 5,
+  "n_values": [
+    4096,
+    8192,
+    16384,
+    32768,
+    65536
+  ],
+  "cluster_sizes": [
+    2,
+    4,
+    8
+  ],
+  "workloads": [
+    "layernorm_backward",
+    "weighted_var_backward",
+    "pearson_backward",
+    "softmax_logits_backward",
+    "lars_momentum",
+    "rowwise_quant"
+  ],
+  "aggregate": {
+    "device": "NVIDIA GeForce RTX 5090",
+    "points": 30,
+    "wins_over_best": 22,
+    "model_points": 30,
+    "model_correct": 27,
+    "largest_width": 65536,
+    "largest_width_geomean_speedup": 1.4655540808656768,
+    "crossovers": [
+      {
+        "workload": "layernorm_backward",
+        "label": "LayerNorm backward",
+        "predicted": 8192,
+        "measured": 8192
+      },
+      {
+        "workload": "weighted_var_backward",
+        "label": "Weighted variance backward",
+        "predicted": 4096,
+        "measured": 8192
+      },
+      {
+        "workload": "pearson_backward",
+        "label": "Pearson backward",
+        "predicted": 4096,
+        "measured": 4096
+      },
+      {
+        "workload": "softmax_logits_backward",
+        "label": "Softmax-logits backward",
+        "predicted": 4096,
+        "measured": 8192
+      },
+      {
+        "workload": "lars_momentum",
+        "label": "LARS momentum",
+        "predicted": 4096,
+        "measured": 4096
+      },
+      {
+        "workload": "rowwise_quant",
+        "label": "Row-wise int8 quantization",
+        "predicted": 8192,
+        "measured": 16384
+      }
+    ]
+  },
+  "cost_model": {
+    "version": "effective-bandwidth-overlap-v2",
+    "uses_dsmem_workload_timing": false,
+    "baseline_calibration": "non-DSMEM CUDA time at the same shape",
+    "previous_correct": 27,
+    "revised_correct": 27,
+    "points": 30
+  }
+}
