@@ -10,6 +10,7 @@ __pycache__/
 agents/
 .codex
 HPEC-Draft/
+.vscode/
 
 # Keep the paper's compact, reproducible RTX 5090 evidence bundle.
 !evaluation/results/
