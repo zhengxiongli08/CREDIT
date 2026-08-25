@@ -1,0 +1,32 @@
+{
+  "measurements": {
+    "name": "NVIDIA H100 80GB HBM3",
+    "clock_ghz": 1.98,
+    "sm_count": 132,
+    "l1_latency_cycles": 41.53,
+    "l2_latency_cycles": 282.84,
+    "dram_latency_cycles": 689.56,
+    "l1_bytes_per_cycle_sm": 46.19,
+    "l2_bytes_per_cycle": 3671.29,
+    "dram_bandwidth_gbps": 2687.36,
+    "cluster_sync_cycles": 851.47,
+    "local_smem_read_latency_cycles": 30.0,
+    "dsmem_read_latency_cycles": 191.0,
+    "local_smem_read_bytes_per_cycle_cta": 20.89,
+    "dsmem_read_bytes_per_cycle_cta": 4.77,
+    "local_smem_store_bytes_per_cycle_cta": 27.67,
+    "dsmem_store_bytes_per_cycle_cta": 21.37,
+    "store_visibility_roundtrip_cycles": 614.03
+  },
+  "cost_model_profile": {
+    "name": "NVIDIA H100 80GB HBM3",
+    "sm_count": 132,
+    "clock_ghz": 1.98,
+    "hbm_bandwidth_gbps": 2687.36,
+    "l2_capacity_bytes": 52428800,
+    "l2_bandwidth_gbps": 7269.1542,
+    "local_smem_bytes_per_cycle_cta": 20.89,
+    "dsmem_store_bytes_per_cycle_cta": 21.37,
+    "max_shared_bytes_per_cta": 232448
+  }
+}

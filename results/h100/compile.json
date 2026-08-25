@@ -1,0 +1,162 @@
+[
+  {
+    "name": "primitive_benchmark",
+    "source": "cuda/primitive_benchmark.cu",
+    "binary": "/tmp/dsmem-eval-ahdbz6_p/run/build/bin/primitive_benchmark",
+    "command": [
+      "nvcc",
+      "-std=c++17",
+      "-O3",
+      "-lineinfo",
+      "-Xcompiler",
+      "-Wall",
+      "-arch=sm_90",
+      "/opt/modal_dsmem_evaluation/cuda/primitive_benchmark.cu",
+      "-o",
+      "/tmp/dsmem-eval-ahdbz6_p/run/build/bin/primitive_benchmark"
+    ],
+    "elapsed_seconds": 4.1205832958221436,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "name": "cluster_control",
+    "source": "cuda/cluster_control.cu",
+    "binary": "/tmp/dsmem-eval-ahdbz6_p/run/build/bin/cluster_control",
+    "command": [
+      "nvcc",
+      "-std=c++17",
+      "-O3",
+      "-lineinfo",
+      "-Xcompiler",
+      "-Wall",
+      "-arch=sm_90",
+      "/opt/modal_dsmem_evaluation/cuda/cluster_control.cu",
+      "-o",
+      "/tmp/dsmem-eval-ahdbz6_p/run/build/bin/cluster_control"
+    ],
+    "elapsed_seconds": 3.4425320625305176,
+    "stdout": "",
+    "stderr": "/opt/modal_dsmem_evaluation/cuda/cluster_control.cu: In function \u2018int main(int, char**)\u2019:\n/opt/modal_dsmem_evaluation/cuda/cluster_control.cu:124:28: warning: comparison of integer expressions of different signedness: \u2018const int\u2019 and \u2018size_t\u2019 {aka \u2018long unsigned int\u2019} [-Wsign-compare]\n  124 |         if (options.shared_bytes > properties.sharedMemPerBlockOptin) {\n      |         ~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"
+  },
+  {
+    "name": "layernorm_backward",
+    "source": "cuda/workloads/layernorm_backward.cu",
+    "binary": "/tmp/dsmem-eval-ahdbz6_p/run/build/bin/layernorm_backward",
+    "command": [
+      "nvcc",
+      "-std=c++17",
+      "-O3",
+      "-lineinfo",
+      "-Xcompiler",
+      "-Wall",
+      "-arch=sm_90",
+      "/opt/modal_dsmem_evaluation/cuda/workloads/layernorm_backward.cu",
+      "-o",
+      "/tmp/dsmem-eval-ahdbz6_p/run/build/bin/layernorm_backward"
+    ],
+    "elapsed_seconds": 4.598893165588379,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "name": "weighted_var_backward",
+    "source": "cuda/workloads/weighted_var_backward.cu",
+    "binary": "/tmp/dsmem-eval-ahdbz6_p/run/build/bin/weighted_var_backward",
+    "command": [
+      "nvcc",
+      "-std=c++17",
+      "-O3",
+      "-lineinfo",
+      "-Xcompiler",
+      "-Wall",
+      "-arch=sm_90",
+      "/opt/modal_dsmem_evaluation/cuda/workloads/weighted_var_backward.cu",
+      "-o",
+      "/tmp/dsmem-eval-ahdbz6_p/run/build/bin/weighted_var_backward"
+    ],
+    "elapsed_seconds": 4.563730955123901,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "name": "pearson_backward",
+    "source": "cuda/workloads/pearson_backward.cu",
+    "binary": "/tmp/dsmem-eval-ahdbz6_p/run/build/bin/pearson_backward",
+    "command": [
+      "nvcc",
+      "-std=c++17",
+      "-O3",
+      "-lineinfo",
+      "-Xcompiler",
+      "-Wall",
+      "-arch=sm_90",
+      "/opt/modal_dsmem_evaluation/cuda/workloads/pearson_backward.cu",
+      "-o",
+      "/tmp/dsmem-eval-ahdbz6_p/run/build/bin/pearson_backward"
+    ],
+    "elapsed_seconds": 4.690893173217773,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "name": "softmax_logits_backward",
+    "source": "cuda/workloads/softmax_logits_backward.cu",
+    "binary": "/tmp/dsmem-eval-ahdbz6_p/run/build/bin/softmax_logits_backward",
+    "command": [
+      "nvcc",
+      "-std=c++17",
+      "-O3",
+      "-lineinfo",
+      "-Xcompiler",
+      "-Wall",
+      "-arch=sm_90",
+      "/opt/modal_dsmem_evaluation/cuda/workloads/softmax_logits_backward.cu",
+      "-o",
+      "/tmp/dsmem-eval-ahdbz6_p/run/build/bin/softmax_logits_backward"
+    ],
+    "elapsed_seconds": 4.263440370559692,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "name": "lars_momentum",
+    "source": "cuda/workloads/lars_momentum.cu",
+    "binary": "/tmp/dsmem-eval-ahdbz6_p/run/build/bin/lars_momentum",
+    "command": [
+      "nvcc",
+      "-std=c++17",
+      "-O3",
+      "-lineinfo",
+      "-Xcompiler",
+      "-Wall",
+      "-arch=sm_90",
+      "/opt/modal_dsmem_evaluation/cuda/workloads/lars_momentum.cu",
+      "-o",
+      "/tmp/dsmem-eval-ahdbz6_p/run/build/bin/lars_momentum"
+    ],
+    "elapsed_seconds": 4.474138975143433,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "name": "rowwise_quant",
+    "source": "cuda/workloads/rowwise_quant.cu",
+    "binary": "/tmp/dsmem-eval-ahdbz6_p/run/build/bin/rowwise_quant",
+    "command": [
+      "nvcc",
+      "-std=c++17",
+      "-O3",
+      "-lineinfo",
+      "-Xcompiler",
+      "-Wall",
+      "-arch=sm_90",
+      "/opt/modal_dsmem_evaluation/cuda/workloads/rowwise_quant.cu",
+      "-o",
+      "/tmp/dsmem-eval-ahdbz6_p/run/build/bin/rowwise_quant"
+    ],
+    "elapsed_seconds": 4.4517433643341064,
+    "stdout": "",
+    "stderr": ""
+  }
+]

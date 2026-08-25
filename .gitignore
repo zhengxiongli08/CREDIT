@@ -1,21 +1,39 @@
-# Ignore files
-bin/
-trash/
-results/
-.clangd
-.clang-format
-ClusterFusion/
-quack/
+# Python
 __pycache__/
-agents/
-.codex
-HPEC-Draft/
-.vscode/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
 
-# Keep the paper's compact, reproducible RTX 5090 evidence bundle.
-!evaluation/results/
-evaluation/results/*
-!evaluation/results/rtx5090/
-!evaluation/results/rtx5090/*.csv
-!evaluation/results/rtx5090/*.json
-!evaluation/results/rtx5090/*.md
+# CUDA and native builds
+build/
+bin/
+*.o
+*.a
+*.so
+*.out
+
+# Profilers and crash output
+perf.data*
+*.ncu-rep
+*.nsys-rep
+core
+core.*
+
+# Generated evaluation runs. The canonical bundles under results/ are tracked.
+results/runs/
+results/reproduced/
+results/h100_*/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+
+# Local release notes; intentionally not part of the public repository.
+.release-checklist.md
+
+# Previous files
+trash/

@@ -1,0 +1,115 @@
+{
+  "status": "complete",
+  "timestamp_utc": "2026-07-13T18:40:00.362951+00:00",
+  "requested_gpu": "H100!",
+  "device": "NVIDIA H100 80GB HBM3",
+  "compute_capability": [
+    9,
+    0
+  ],
+  "compile_architecture": "sm_90",
+  "torch_version": "2.11.0+cu130",
+  "torch_cuda_version": "13.0",
+  "triton_version": "3.6.0",
+  "python_version": "3.11.5",
+  "platform": "Linux-4.19.0-gvisor-x86_64-with-glibc2.39",
+  "nvidia_smi_before": "NVIDIA H100 80GB HBM3, 580.95.05, 81559, 700.00, 1980, 345, 33",
+  "config": {
+    "workloads": [
+      "layernorm_backward",
+      "weighted_var_backward",
+      "pearson_backward",
+      "softmax_logits_backward",
+      "lars_momentum",
+      "rowwise_quant"
+    ],
+    "n_values": [
+      4096,
+      8192,
+      16384,
+      32768,
+      65536
+    ],
+    "cluster_sizes": [
+      2,
+      4,
+      8
+    ],
+    "warmup": 20,
+    "iterations": 100,
+    "trials": 5,
+    "quick": false,
+    "profile_only": false
+  },
+  "profile": {
+    "name": "NVIDIA H100 80GB HBM3",
+    "sm_count": 132,
+    "clock_ghz": 1.98,
+    "hbm_bandwidth_gbps": 2687.36,
+    "l2_capacity_bytes": 52428800,
+    "l2_bandwidth_gbps": 7269.1542,
+    "local_smem_bytes_per_cycle_cta": 20.89,
+    "dsmem_store_bytes_per_cycle_cta": 21.37,
+    "max_shared_bytes_per_cta": 232448,
+    "local_smem_store_bytes_per_cycle_cta": 27.67
+  },
+  "compile_seconds": 34.60625600814819,
+  "benchmark_seconds": 512.6179323196411,
+  "elapsed_seconds": 547.2241883277893,
+  "nvidia_smi_after": "NVIDIA H100 80GB HBM3, 580.95.05, 81559, 700.00, 1980, 1980, 43",
+  "aggregate": {
+    "device": "NVIDIA H100 80GB HBM3",
+    "points": 30,
+    "wins_over_best": 9,
+    "model_points": 30,
+    "model_correct": 28,
+    "largest_width": 65536,
+    "largest_width_geomean_speedup": 1.3184238429115953,
+    "crossovers": [
+      {
+        "workload": "layernorm_backward",
+        "label": "LayerNorm backward",
+        "predicted": 8192,
+        "measured": 8192
+      },
+      {
+        "workload": "weighted_var_backward",
+        "label": "Weighted variance backward",
+        "predicted": 8192,
+        "measured": 8192
+      },
+      {
+        "workload": "pearson_backward",
+        "label": "Pearson backward",
+        "predicted": 16384,
+        "measured": 8192
+      },
+      {
+        "workload": "softmax_logits_backward",
+        "label": "Softmax-logits backward",
+        "predicted": 16384,
+        "measured": 16384
+      },
+      {
+        "workload": "lars_momentum",
+        "label": "LARS momentum",
+        "predicted": 8192,
+        "measured": 4096
+      },
+      {
+        "workload": "rowwise_quant",
+        "label": "Row-wise int8 quantization",
+        "predicted": 32768,
+        "measured": 32768
+      }
+    ]
+  },
+  "cost_model": {
+    "version": "effective-bandwidth-overlap-v2",
+    "uses_dsmem_workload_timing": false,
+    "baseline_calibration": "non-DSMEM CUDA time at the same shape",
+    "previous_correct": 16,
+    "revised_correct": 28,
+    "points": 30
+  }
+}

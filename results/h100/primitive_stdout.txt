@@ -1,0 +1,33 @@
+GPU Model: NVIDIA H100 80GB HBM3
+Clock frequency: 1.98 GHz
+SM count: 132
+===== Profiling ======
+L1 read latency   : 41.53 cycles (20.97 ns)
+L2 read latency   : 282.84 cycles (142.85 ns)
+DRAM read latency : 689.56 cycles (348.26 ns)
+L1 cache bandwidth      : 46.19 B/cycle/SM
+L2 cache bandwidth      : 3671.29 B/cycle
+Global memory bandwidth : 2687.36 GB/s
+----- Inter-SM DSMEM (2 CTAs, 256 threads/CTA) -----
+Dynamic shared memory/CTA         : 116992 bytes (forces <=1 CTA/SM)
+cluster sync                       : SM 124 -> SM 125
+read latency                       : SM 124 -> SM 125
+throughput                         : SM 124 -> SM 125
+visibility                         : SM 124 -> SM 125
+Cluster sync latency               :    851.47 cycles/sync  (min 851.30, max 853.24)
+Local SMEM read latency            :     30.00 cycles/load  (min 29.00, max 31.00)
+DSMEM read latency                 :    191.00 cycles/load  (min 190.99, max 191.00)
+Local SMEM read throughput         :     20.89 B/cycle/CTA  (min 20.89, max 20.89)
+DSMEM read throughput              :      4.77 B/cycle/CTA  (min 4.77, max 4.77)
+Local SMEM store throughput        :     27.67 B/cycle/CTA  (min 27.60, max 27.67)
+DSMEM store issue throughput       :     21.37 B/cycle/CTA  (min 21.36, max 21.37)
+Store visibility round trip        :    614.03 cycles/roundtrip  (min 614.03, max 614.03)
+One-way visibility estimate        :    307.01 cycles  (min 307.01, max 307.01)
+==================== SUMMARY ====================
+L1   read latency       :    41.53 cycles
+L2   read latency       :   282.84 cycles
+DRAM read latency       :   689.56 cycles
+L1   bandwidth          :    46.19 B/cycle/SM
+L2   bandwidth          :  3671.29 B/cycle
+DRAM bandwidth          :  2687.36 GB/s
+=================================================

@@ -1,0 +1,38 @@
+{
+  "manifest_version": 1,
+  "description": "SHA-256 hashes for CUDA sources snapshotted in the camera-ready artifact.",
+  "files": [
+    {
+      "path": "cuda/primitive_benchmark.cu",
+      "sha256": "99ec3769d45ee4c3f3d846f6ee42fee07a04193cde27329d9c3ce1ef0ea03277"
+    },
+    {
+      "path": "cuda/cluster_control.cu",
+      "sha256": "27e4d6581e2bd69b34544fb1629783ed7735f22213859c8b646af34783f40c29"
+    },
+    {
+      "path": "cuda/workloads/layernorm_backward.cu",
+      "sha256": "c11f96e65e53ca2588a7b1d7cf77b93e533dd139ea34a89930e10975a019ef46"
+    },
+    {
+      "path": "cuda/workloads/weighted_var_backward.cu",
+      "sha256": "68ca8375960809896c254def6db3c758122164d9c57232e7cd55d74be88aab4a"
+    },
+    {
+      "path": "cuda/workloads/pearson_backward.cu",
+      "sha256": "5830eeace281f62f96a62df1d5e153dd69450e6c760b4024d6f6e825919da6eb"
+    },
+    {
+      "path": "cuda/workloads/softmax_logits_backward.cu",
+      "sha256": "c294893f48208931cd2353086cbd22585d61100a45b67b8430a9895749a26db2"
+    },
+    {
+      "path": "cuda/workloads/lars_momentum.cu",
+      "sha256": "b407cea2f65d59e65e6d239f8fc5640cc04a322b99cd4b38ac082ec68dcc3db7"
+    },
+    {
+      "path": "cuda/workloads/rowwise_quant.cu",
+      "sha256": "40a53778aa0fcc2f2ffeddc76a6d3b698c553c541940f2adfc97db199e99940f"
+    }
+  ]
+}
