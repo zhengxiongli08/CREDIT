@@ -26,8 +26,6 @@ from .workloads import WORKLOADS, WorkloadSpec
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-CUDA_DIR = PACKAGE_ROOT / "cuda"
-WORKLOAD_SOURCE_DIR = CUDA_DIR / "workloads"
 DEFAULT_N_VALUES = (4096, 8192, 16384, 32768, 65536)
 DEFAULT_CLUSTER_SIZES = (2, 4, 8)
 DEFAULT_TRITON_CONFIGS = ((256, 4), (512, 4), (1024, 8))
@@ -236,54 +234,21 @@ def nvidia_smi_snapshot() -> str:
     ).stdout.strip()
 
 
-def compile_cuda_sources(
-    architecture: str, build_dir: Path, selected_names: tuple[str, ...]
-) -> list[dict[str, Any]]:
-    binary_dir = build_dir / "bin"
-    binary_dir.mkdir(parents=True, exist_ok=True)
-    sources = [
-        ("primitive_benchmark", CUDA_DIR / "primitive_benchmark.cu"),
-        ("cluster_control", CUDA_DIR / "cluster_control.cu"),
-    ]
-    sources.extend(
-        (WORKLOADS[name].cuda_binary, WORKLOAD_SOURCE_DIR / WORKLOADS[name].cuda_source)
-        for name in selected_names
-    )
-    records: list[dict[str, Any]] = []
-    for binary_name, source in sources:
-        binary = binary_dir / binary_name
-        command = [
-            "nvcc",
-            "-std=c++17",
-            "-O3",
-            "-lineinfo",
-            "-Xcompiler",
-            "-Wall",
-            f"-arch={architecture}",
-            str(source),
-            "-o",
-            str(binary),
-        ]
-        started = time.time()
-        result = run_checked(command, timeout=15 * 60)
-        records.append(
-            {
-                "name": binary_name,
-                "source": str(source.relative_to(PACKAGE_ROOT)),
-                "binary": str(binary),
-                "command": command,
-                "elapsed_seconds": time.time() - started,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-            }
+def require_cuda_binaries(build_dir: Path, selected_names: tuple[str, ...]) -> None:
+    required = ["primitive_benchmark", "cluster_control", *selected_names]
+    missing = [name for name in required if not (build_dir / name).is_file()]
+    if missing:
+        targets = "benchmark" if not selected_names else "all"
+        raise FileNotFoundError(
+            f"missing CUDA binaries in {build_dir}: {', '.join(missing)}; "
+            f"run `make {targets}` from {PACKAGE_ROOT} first"
         )
-    return records
 
 
 def run_primitive_profile(
     build_dir: Path,
 ) -> tuple[dict[str, Any], DeviceProfile, str]:
-    result = run_checked([str(build_dir / "bin/primitive_benchmark")], timeout=20 * 60)
+    result = run_checked([str(build_dir / "primitive_benchmark")], timeout=20 * 60)
     parsed = parse_primitive_output(result.stdout)
     properties = torch.cuda.get_device_properties(0)
     profile = make_device_profile(parsed, properties)
@@ -323,7 +288,7 @@ def run_cuda_trials(
     trials: int,
 ) -> list[dict[str, Any]]:
     command = [
-        str(build_dir / "bin" / spec.cuda_binary),
+        str(build_dir / spec.name),
         "--csv",
         "--rows",
         str(rows),
@@ -356,7 +321,7 @@ def run_control_trials(
     trials: int,
 ) -> list[float]:
     command = [
-        str(build_dir / "bin/cluster_control"),
+        str(build_dir / "cluster_control"),
         "--rows",
         str(rows),
         "--cluster-size",
@@ -662,8 +627,7 @@ def run_suite(
         raise RuntimeError("CUDA is unavailable")
     config = RunConfig.from_dict(raw_config).effective()
     output_dir.mkdir(parents=True, exist_ok=True)
-    build_dir = output_dir / "build"
-    build_dir.mkdir(parents=True, exist_ok=True)
+    build_dir = PACKAGE_ROOT / "build"
     started = time.time()
 
     properties = torch.cuda.get_device_properties(0)
@@ -675,7 +639,7 @@ def run_suite(
         "requested_gpu": requested_gpu,
         "device": device_name,
         "compute_capability": [properties.major, properties.minor],
-        "compile_architecture": architecture,
+        "device_architecture": architecture,
         "torch_version": torch.__version__,
         "torch_cuda_version": torch.version.cuda,
         "triton_version": triton.__version__,
@@ -693,13 +657,8 @@ def run_suite(
         json.dumps(initial_metadata, indent=2) + "\n", encoding="utf-8"
     )
 
-    compile_started = time.time()
-    compile_records = compile_cuda_sources(
-        architecture, build_dir, config.workloads if not config.profile_only else ()
-    )
-    compile_seconds = time.time() - compile_started
-    (output_dir / "compile.json").write_text(
-        json.dumps(compile_records, indent=2) + "\n", encoding="utf-8"
+    require_cuda_binaries(
+        build_dir, config.workloads if not config.profile_only else ()
     )
     primitive, profile, primitive_stdout = run_primitive_profile(build_dir)
     (output_dir / "primitive_stdout.txt").write_text(
@@ -720,8 +679,7 @@ def run_suite(
             **initial_metadata,
             "status": "complete",
             "profile": profile_as_dict(profile),
-            "compile_seconds": compile_seconds,
-            "benchmark_seconds": finished - started - compile_seconds,
+            "benchmark_seconds": finished - started,
             "elapsed_seconds": finished - started,
             "nvidia_smi_after": nvidia_smi_snapshot(),
         }
@@ -824,8 +782,7 @@ def run_suite(
         **initial_metadata,
         "status": "complete",
         "profile": profile_as_dict(profile),
-        "compile_seconds": compile_seconds,
-        "benchmark_seconds": finished - started - compile_seconds,
+        "benchmark_seconds": finished - started,
         "elapsed_seconds": finished - started,
         "nvidia_smi_after": nvidia_smi_snapshot(),
     }

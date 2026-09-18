@@ -1,6 +1,6 @@
-# Included Results
+# Evaluation Results
 
-The repository includes the canonical result bundles used for the RTX 5090 and H100 comparison. No B200 measurements are included or used.
+Complete runs are stored as timestamped bundles directly under `results/`. Local runs use `local_<timestamp>` and Modal H100 runs use `h100_<timestamp>`. No B200 measurements are included or used.
 
 ## Summary
 
@@ -45,10 +45,22 @@ The `*.peak_model.csv` files preserve the earlier cost-model outputs used for th
 Run:
 
 ```bash
-python scripts/aggregate.py \
-  results/rtx5090 \
-  results/h100 \
+python scripts/analyze_results.py \
+  results/local_<rtx-timestamp> \
+  results/h100_<h100-timestamp> \
   --output-dir results/reproduced
 ```
 
-This produces the cross-GPU point table, width aggregates, model-accuracy table, Markdown report, PDF figure, and PNG preview. The expected compact report is available at `results/comparison/CROSS_GPU_REPORT.md`.
+This produces the cross-GPU point table, width aggregates, model-accuracy table, and Markdown report. Generate the camera-ready evaluation figures separately with:
+
+```bash
+python scripts/plot/plot_workload_scaling.py \
+  results/local_<rtx-timestamp> results/h100_<h100-timestamp>
+python scripts/plot/plot_model_validation.py \
+  results/local_<rtx-timestamp> results/h100_<h100-timestamp>
+python scripts/plot/plot_traffic_reduction.py
+```
+
+The two data-driven plotting scripts require the selected timestamped RTX 5090 and H100 bundles as positional arguments. They do not select a latest run automatically. All three scripts write PDFs to `results/figures/` by default.
+
+When `--output-dir results/comparison` is used, the compact report is written to `results/comparison/CROSS_GPU_REPORT.md`.

@@ -121,7 +121,8 @@ int main(int argc, char** argv) {
         if (!properties.clusterLaunch) {
             throw std::runtime_error("device does not support cluster launch");
         }
-        if (options.shared_bytes > properties.sharedMemPerBlockOptin) {
+        if (static_cast<size_t>(options.shared_bytes) >
+            properties.sharedMemPerBlockOptin) {
             std::cout << "UNSUPPORTED," << options.rows << ','
                       << options.cluster_size << ',' << options.barriers << ','
                       << options.shared_bytes << ",shared-memory-limit\n";

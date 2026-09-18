@@ -5,6 +5,8 @@ from typing import Callable
 
 import torch
 
+from .workload_metadata import model_fields
+
 
 TensorTuple = tuple[torch.Tensor, ...]
 TorchFunction = Callable[..., torch.Tensor | TensorTuple]
@@ -17,8 +19,6 @@ class WorkloadSpec:
     label: str
     category: str
     rows: int
-    cuda_source: str
-    cuda_binary: str
     torch_function: TorchFunction
     input_factory: InputFactory
     modeled_bytes_per_element: float
@@ -157,97 +157,55 @@ def rowwise_quant(x: torch.Tensor) -> TensorTuple:
 WORKLOADS = {
     "layernorm_backward": WorkloadSpec(
         name="layernorm_backward",
-        label="LayerNorm backward",
-        category="normalization",
         rows=2048,
-        cuda_source="layernorm_backward.cu",
-        cuda_binary="layernorm_backward",
         torch_function=layernorm_backward,
         input_factory=make_layernorm_inputs,
-        modeled_bytes_per_element=32.0,
-        reread_bytes_per_element=12.0,
-        staged_bytes_per_element=4,
-        reductions_per_stage=(2, 2),
+        **model_fields("layernorm_backward"),
         atol=2.0e-2,
         rtol=2.0e-2,
     ),
     "weighted_var_backward": WorkloadSpec(
         name="weighted_var_backward",
-        label="Weighted variance backward",
-        category="normalization",
         rows=4096,
-        cuda_source="weighted_var_backward.cu",
-        cuda_binary="weighted_var_backward",
         torch_function=weighted_var_backward,
         input_factory=make_weighted_var_inputs,
-        modeled_bytes_per_element=40.0,
-        reread_bytes_per_element=24.0,
-        staged_bytes_per_element=12,
-        reductions_per_stage=(2, 1, 2),
+        **model_fields("weighted_var_backward"),
         atol=3.0e-2,
         rtol=3.0e-2,
     ),
     "pearson_backward": WorkloadSpec(
         name="pearson_backward",
-        label="Pearson backward",
-        category="pairwise statistics",
         rows=4096,
-        cuda_source="pearson_backward.cu",
-        cuda_binary="pearson_backward",
         torch_function=pearson_backward,
         input_factory=make_pearson_inputs,
-        modeled_bytes_per_element=24.0,
-        reread_bytes_per_element=8.0,
-        staged_bytes_per_element=8,
-        reductions_per_stage=(2, 3),
+        **model_fields("pearson_backward"),
         atol=3.0e-3,
         rtol=3.0e-3,
     ),
     "softmax_logits_backward": WorkloadSpec(
         name="softmax_logits_backward",
-        label="Softmax-logits backward",
-        category="softmax",
         rows=4096,
-        cuda_source="softmax_logits_backward.cu",
-        cuda_binary="softmax_logits_backward",
         torch_function=softmax_logits_backward,
         input_factory=make_softmax_inputs,
-        modeled_bytes_per_element=28.0,
-        reread_bytes_per_element=16.0,
-        staged_bytes_per_element=8,
-        reductions_per_stage=(1, 1, 1),
+        **model_fields("softmax_logits_backward"),
         atol=3.0e-3,
         rtol=3.0e-3,
     ),
     "lars_momentum": WorkloadSpec(
         name="lars_momentum",
-        label="LARS momentum",
-        category="optimizer",
         rows=4096,
-        cuda_source="lars_momentum.cu",
-        cuda_binary="lars_momentum",
         torch_function=lars_momentum,
         input_factory=make_lars_inputs,
-        modeled_bytes_per_element=32.0,
-        reread_bytes_per_element=12.0,
-        staged_bytes_per_element=12,
-        reductions_per_stage=(2,),
+        **model_fields("lars_momentum"),
         atol=3.0e-3,
         rtol=3.0e-3,
     ),
     "rowwise_quant": WorkloadSpec(
         name="rowwise_quant",
-        label="Row-wise int8 quantization",
-        category="quantization",
         rows=4096,
-        cuda_source="rowwise_quant.cu",
-        cuda_binary="rowwise_quant",
         torch_function=rowwise_quant,
         input_factory=make_quant_inputs,
-        modeled_bytes_per_element=9.0,
-        reread_bytes_per_element=4.0,
-        staged_bytes_per_element=4,
-        reductions_per_stage=(1,),
+        **model_fields("rowwise_quant"),
         atol=1.0e-6,
         rtol=1.0e-6,
     ),

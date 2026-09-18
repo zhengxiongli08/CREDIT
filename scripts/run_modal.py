@@ -12,7 +12,7 @@ from typing import Any
 import modal
 
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parents[1]
 REMOTE_ROOT = "/opt/credit"
 CUDA_IMAGE = "nvidia/cuda:13.0.1-devel-ubuntu24.04"
 TORCH_VERSION = "2.11.0"
@@ -31,12 +31,14 @@ image = (
             "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor",
         }
     )
+    .add_local_file(HERE / "Makefile", f"{REMOTE_ROOT}/Makefile", copy=True)
+    .add_local_dir(HERE / "src", f"{REMOTE_ROOT}/src", copy=True)
+    .run_commands(f"make -C {REMOTE_ROOT} CUDA_ARCH=sm_90 all")
     .add_local_dir(
         HERE / "dsmem_eval",
         f"{REMOTE_ROOT}/dsmem_eval",
         ignore=["**/__pycache__/**", "**/*.pyc"],
     )
-    .add_local_dir(HERE / "cuda", f"{REMOTE_ROOT}/cuda")
 )
 
 app = modal.App("credit-h100-evaluation")

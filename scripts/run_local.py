@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 AVAILABLE_WORKLOADS = (
     "layernorm_backward",
     "weighted_var_backward",
@@ -72,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=ROOT / "results" / "runs" / f"local_{timestamp}",
+        default=ROOT / "results" / f"local_{timestamp}",
     )
     return parser.parse_args()
 

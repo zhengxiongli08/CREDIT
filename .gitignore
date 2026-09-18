@@ -1,40 +1,9 @@
-# Python
+# Folders
 __pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.venv/
-venv/
-
-# CUDA and native builds
 build/
-bin/
-*.o
-*.a
-*.so
-*.out
-
-# Profilers and crash output
-perf.data*
-*.ncu-rep
-*.nsys-rep
-core
-core.*
-
-# Generated evaluation runs. The canonical bundles under results/ are tracked.
-results/runs/
-results/reproduced/
-results/h100_*/
-
-# Editors and operating systems
-.idea/
-.vscode/
-.DS_Store
-
-# Local release notes; intentionally not part of the public repository.
-.release-checklist.md
-
-# Previous files
+results/
 trash/
-HPEC-draft/
+
+# Files
+.clang-format
+.clangd

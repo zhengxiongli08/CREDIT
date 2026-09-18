@@ -9,7 +9,7 @@ For every `(device, workload, width)` point, the runner measures four implementa
 3. The applicable non-DSMEM CUDA implementation.
 4. DSMEM CUDA at every legal cluster size in the configured set.
 
-Compilation, TorchInductor compilation, and Triton configuration search occur before reported timing. Framework and CUDA outputs are validated before performance results are accepted.
+CUDA compilation is performed separately through the root Makefile. TorchInductor compilation and Triton configuration search occur before reported timing. Framework and CUDA outputs are validated before performance results are accepted.
 
 ## Cost-Model Inputs
 
@@ -32,9 +32,9 @@ The Modal job records an `nvidia-smi` snapshot before and after each run. Privil
 
 A new evaluated workload requires four coordinated pieces:
 
-1. A standalone source under `cuda/workloads/` that emits the runner's `RESULT,...` CSV records and validates its outputs.
+1. A standalone source under `src/workloads/` that emits the runner's `RESULT,...` CSV records and validates its outputs, plus its name in the root Makefile.
 2. A `WorkloadSpec` and eager PyTorch reference in `dsmem_eval/workloads.py`.
 3. A launcher and output allocator in `dsmem_eval/triton_kernels.py`.
 4. Static model fields for total bytes, avoidable reread bytes, staged bytes, and reduction partial counts.
 
-Start with `--quick --workloads NAME`, inspect correctness diagnostics, and only then run the complete protocol.
+Build with `make NAME`, then start with `python scripts/run_local.py --quick --workloads NAME`. Inspect correctness diagnostics before running the complete protocol.
