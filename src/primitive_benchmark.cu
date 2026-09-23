@@ -1,5 +1,4 @@
 // Portable L1/L2/DRAM and DSMEM microbenchmarks for Compute Capability 9.0+.
-// The Modal runner compiles this source for the allocated GPU at run time.
 
 #include <cooperative_groups.h>
 #include <cuda_runtime.h>

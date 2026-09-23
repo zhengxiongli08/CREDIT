@@ -1,0 +1,6 @@
+.git
+.gitignore
+build
+results
+trash
+__pycache__
